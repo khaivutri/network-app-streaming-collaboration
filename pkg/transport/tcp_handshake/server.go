@@ -81,44 +81,84 @@ func StartTCPServer(ctx context.Context, listenAddr string) error {
 
 func (s *Server) handleConn(ctx context.Context, conn *net.TCPConn) {
 	defer conn.Close()
+
+	// Enforce an overall deadline to mitigate Slowloris and hung connection attacks.
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	// Step 1: Inbound Handshake Request (SYN)
 	pkt, err := ReadTCPFrame(conn)
 	if err != nil {
 		return
 	}
+
+	// Validate SYN invariants: must initiate handshake with unassigned ConnectionID and SeqNum 0.
 	if pkt.Hdr.Flags != protocol.FlagSYN || pkt.Hdr.MsgType != protocol.MsgCtrlHandshake || pkt.Hdr.ConnectionID != 0 || pkt.Hdr.SeqNum != 0 {
 		s.sendReset(conn, pkt.Hdr.ConnectionID)
 		return
 	}
+
+	// Parse client metadata; reject malformed handshake payload immediately.
 	var hello protocol.HandshakeSYNPayload
 	if _, err = protocol.DecodeJSONPayload[protocol.HandshakeSYNPayload](pkt.Payload); err != nil {
 		s.sendReset(conn, 0)
 		return
 	}
+
+	// Step 2: Session Allocation
+	// Reserve a unique non-zero ConnectionID; ensure cleanup upon handler exit.
 	id, err := s.reserveID()
 	if err != nil {
 		s.sendReset(conn, 0)
 		return
 	}
 	defer s.releaseID(id)
-	welcome := protocol.HandshakeSYNACKPayload{Status: protocol.HandshakeStatusAcknowledged, Message: protocol.DefaultWelcomeMessage, AssignedConnID: id, ClientAddr: conn.RemoteAddr().String(), ServerTime: time.Now().UnixMilli()}
+
+	// Step 3: Outbound Handshake Response (SYN-ACK)
+	welcome := protocol.HandshakeSYNACKPayload{
+		Status:         protocol.HandshakeStatusAcknowledged,
+		Message:        protocol.DefaultWelcomeMessage,
+		AssignedConnID: id,
+		ClientAddr:     conn.RemoteAddr().String(),
+		ServerTime:     time.Now().UnixMilli(),
+	}
 	payload, err := protocol.EncodeJSONPayload(welcome)
 	if err != nil {
 		return
 	}
-	synAck := &protocol.Packet{Hdr: protocol.Header{Version: protocol.ProtocolVersion, Flags: protocol.FlagSYN | protocol.FlagACK, MsgType: protocol.MsgCtrlHandshake, StreamID: protocol.StreamControl, ConnectionID: id, AckNum: 1, WindowSize: protocol.DefaultWindowSize}, Payload: payload}
+
+	synAck := &protocol.Packet{
+		Hdr: protocol.Header{
+			Version:      protocol.ProtocolVersion,
+			Flags:        protocol.FlagSYN | protocol.FlagACK,
+			MsgType:      protocol.MsgCtrlHandshake,
+			StreamID:     protocol.StreamControl,
+			ConnectionID: id,
+			AckNum:       1,
+			WindowSize:   protocol.DefaultWindowSize,
+		},
+		Payload: payload,
+	}
 	if err = WriteTCPFrame(conn, synAck); err != nil {
 		return
 	}
+
+	// Step 4: Final Handshake Confirmation (ACK)
+	// Verify that client acknowledged the assigned ID with expected sequence alignment.
 	ack, err := ReadTCPFrame(conn)
 	if err != nil || ack.Hdr.Flags != protocol.FlagACK || ack.Hdr.ConnectionID != id || ack.Hdr.SeqNum != 1 || ack.Hdr.AckNum != 1 {
 		return
 	}
+
+	// Step 5: Graceful Shutdown Check
+	// Abort if the server context was cancelled while completing the handshake.
 	select {
 	case <-ctx.Done():
 		return
 	default:
 	}
+
+	// Step 6: Session Teardown (FIN / FIN-ACK)
+	// Await graceful termination signal from client before closing connection.
 	fin, err := ReadTCPFrame(conn)
 	if err != nil {
 		return
@@ -126,8 +166,22 @@ func (s *Server) handleConn(ctx context.Context, conn *net.TCPConn) {
 	if !fin.Hdr.HasFlag(protocol.FlagFIN) || fin.Hdr.ConnectionID != id {
 		return
 	}
-	finAck := &protocol.Packet{Hdr: protocol.Header{Version: protocol.ProtocolVersion, Flags: protocol.FlagFIN | protocol.FlagACK, MsgType: protocol.MsgCtrlHandshake, StreamID: protocol.StreamControl, ConnectionID: id, SeqNum: 1, AckNum: fin.Hdr.SeqNum + 1, WindowSize: protocol.DefaultWindowSize}}
+
+	finAck := &protocol.Packet{
+		Hdr: protocol.Header{
+			Version:      protocol.ProtocolVersion,
+			Flags:        protocol.FlagFIN | protocol.FlagACK,
+			MsgType:      protocol.MsgCtrlHandshake,
+			StreamID:     protocol.StreamControl,
+			ConnectionID: id,
+			SeqNum:       1,
+			AckNum:       fin.Hdr.SeqNum + 1,
+			WindowSize:   protocol.DefaultWindowSize,
+		},
+	}
 	_ = WriteTCPFrame(conn, finAck)
+
+	// Preserve hello variable reference if needed by future tracing or metrics.
 	_ = hello
 }
 func (s *Server) reserveID() (uint32, error) {
