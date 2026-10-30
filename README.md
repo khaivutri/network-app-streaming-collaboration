@@ -1,4 +1,4 @@
-# network-app-streaming-collaboration-
+# network-app-streaming-collaboration
 # Network App — Step 2
 
 Ứng dụng cộng tác mạng dùng custom application protocol với header cố định 20 byte Big-Endian, TCP handshake cho mốc Step 2 và nền tảng reliable UDP cho các bước tiếp theo.
