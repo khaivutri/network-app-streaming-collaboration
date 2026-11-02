@@ -154,11 +154,13 @@ func (m *ClientStateMachine) OnHeartbeatMissed() Action {
 
 // ServerStateMachine models the five server connection states.
 type ServerStateMachine struct {
-	mu           sync.Mutex
-	state        transport.ConnState
-	connectionID uint32
-	retries      int
-	reason       transport.CloseReason
+	mu               sync.Mutex
+	state            transport.ConnState
+	connectionID     uint32
+	retries          int
+	finRetries       int
+	missedHeartbeats int
+	reason           transport.CloseReason
 }
 
 // NewServerStateMachine constructs a server state machine.
@@ -208,6 +210,14 @@ func (m *ServerStateMachine) OnPacket(pkt *protocol.Packet) Action {
 		m.state = transport.StateConnected
 		return Action{}
 	}
+	if m.state == transport.StateFinWait && pkt.Hdr.HasFlag(protocol.FlagFIN) && pkt.Hdr.ConnectionID == m.connectionID {
+		m.state = transport.StateCloseReady
+		return Action{Packet: controlPacket(protocol.FlagFIN|protocol.FlagACK, m.connectionID, 1, pkt.Hdr.SeqNum+1)}
+	}
+	if m.state == transport.StateFinWait && pkt.Hdr.HasFlag(protocol.FlagACK) && pkt.Hdr.ConnectionID == m.connectionID {
+		m.state = transport.StateCloseReady
+		return Action{}
+	}
 	if m.state == transport.StateConnected && pkt.Hdr.HasFlag(protocol.FlagFIN) && pkt.Hdr.ConnectionID == m.connectionID {
 		m.state = transport.StateCloseReady
 		return Action{Packet: controlPacket(protocol.FlagFIN|protocol.FlagACK, m.connectionID, 1, pkt.Hdr.SeqNum+1)}
@@ -216,6 +226,53 @@ func (m *ServerStateMachine) OnPacket(pkt *protocol.Packet) Action {
 		return Action{Packet: controlPacket(protocol.FlagFIN|protocol.FlagACK, m.connectionID, 1, pkt.Hdr.SeqNum+1)}
 	}
 	return Action{Discard: true}
+}
+
+// OnHandshakeTimeout retransmits SYN-ACK while the handshake retry budget remains.
+func (m *ServerStateMachine) OnHandshakeTimeout() Action {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.state != transport.StateSynReceived {
+		return Action{Discard: true}
+	}
+	if m.retries >= MaxHandshakeRetries {
+		m.state = transport.StateClosed
+		m.reason = transport.CloseReasonHandshakeTimeout
+		return Action{CloseReason: m.reason}
+	}
+	m.retries++
+	return Action{Packet: controlPacket(protocol.FlagSYN|protocol.FlagACK, m.connectionID, 0, 1)}
+}
+
+// OnFINTimeout retransmits FIN and eventually force-closes into CLOSE_READY.
+func (m *ServerStateMachine) OnFINTimeout() Action {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.state != transport.StateFinWait {
+		return Action{Discard: true}
+	}
+	if m.finRetries >= MaxFINRetries {
+		m.state = transport.StateCloseReady
+		return Action{}
+	}
+	m.finRetries++
+	return Action{Packet: controlPacket(protocol.FlagFIN, m.connectionID, 1, 1)}
+}
+
+// OnHeartbeatMissed aborts a connected server session after repeated heartbeat loss.
+func (m *ServerStateMachine) OnHeartbeatMissed() Action {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.state != transport.StateConnected {
+		return Action{Discard: true}
+	}
+	m.missedHeartbeats++
+	if m.missedHeartbeats >= MaxMissedHeartbeats {
+		m.state = transport.StateClosed
+		m.reason = transport.CloseReasonHeartbeatTimeout
+		return Action{CloseReason: m.reason}
+	}
+	return Action{}
 }
 
 // Disconnect starts server-initiated teardown.
@@ -239,5 +296,15 @@ func (m *ServerStateMachine) OnCleanupTimeout() Action {
 	return Action{}
 }
 func controlPacket(flags uint8, id, seq, ack uint32) *protocol.Packet {
-	return &protocol.Packet{Hdr: protocol.Header{Version: protocol.ProtocolVersion, Flags: flags, MsgType: protocol.MsgCtrlHandshake, StreamID: protocol.StreamControl, ConnectionID: id, SeqNum: seq, AckNum: ack, WindowSize: protocol.DefaultWindowSize}}
+	return &protocol.Packet{
+		Hdr: protocol.Header{
+			Version: protocol.ProtocolVersion, 
+			Flags: flags, 
+			MsgType: protocol.MsgCtrlHandshake, 
+			StreamID: protocol.StreamControl, 
+			ConnectionID: id, 
+			SeqNum: seq, 
+			AckNum: ack, 
+			WindowSize: protocol.DefaultWindowSize,
+		}}
 }

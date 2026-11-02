@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/protocol"
@@ -14,46 +15,71 @@ import (
 // UDPConfig controls UDP handshake timing and packet filtering.
 type UDPConfig struct {
 	HandshakeTimeout time.Duration
-	PacketDropHook   func(string, *protocol.Packet) bool
+	PacketDropHook   func(dir string, pkt *protocol.Packet) bool
 }
 
-// UDPHandshakeServer serves application handshakes over UDP.
+// UDPHandshakeServer serves handshakes over one UDP socket. Both indexes are protected
+// by mu so session lookup and cleanup remain race-free as packet handling scales.
 type UDPHandshakeServer struct {
 	conn     *net.UDPConn
 	addr     *net.UDPAddr
-	dropHook func(string, *protocol.Packet) bool
-	sessions map[string]uint32
+	dropHook func(dir string, pkt *protocol.Packet) bool
+	mu       sync.RWMutex
+	sessions map[string]*ServerStateMachine
+	idToAddr map[uint32]string
 }
 
 // NewUDPHandshakeServer binds a UDP handshake server.
 func NewUDPHandshakeServer(listenAddr string, cfg ...UDPConfig) (*UDPHandshakeServer, error) {
 	addr, err := net.ResolveUDPAddr("udp", listenAddr)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("rudp: resolve udp addr failed: %w", err)
 	}
 	conn, err := net.ListenUDP("udp", addr)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("rudp: listen udp failed: %w", err)
 	}
-	s := &UDPHandshakeServer{conn: conn, addr: conn.LocalAddr().(*net.UDPAddr), sessions: make(map[string]uint32)}
+	server := &UDPHandshakeServer{
+		conn:     conn,
+		addr:     conn.LocalAddr().(*net.UDPAddr),
+		sessions: make(map[string]*ServerStateMachine),
+		idToAddr: make(map[uint32]string),
+	}
 	if len(cfg) > 0 {
-		s.dropHook = cfg[0].PacketDropHook
+		server.dropHook = cfg[0].PacketDropHook
 	}
-	return s, configureUDPSocket(conn)
+	if err := configureUDPSocket(conn); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("rudp: configure udp socket failed: %w", err)
+	}
+	return server, nil
 }
 
 // Addr returns the actual bound address.
 func (s *UDPHandshakeServer) Addr() net.Addr { return s.addr }
 
-// Close stops the server.
-func (s *UDPHandshakeServer) Close() error { return s.conn.Close() }
+// Close releases the indexes before closing the socket, preserving the map invariant.
+func (s *UDPHandshakeServer) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key := range s.sessions {
+		delete(s.sessions, key)
+	}
+	for id := range s.idToAddr {
+		delete(s.idToAddr, id)
+	}
+	return s.conn.Close()
+}
 
-// Serve handles SYN, ACK, and FIN packets until context cancellation.
+// Serve handles packets until the context is cancelled.
 func (s *UDPHandshakeServer) Serve(ctx context.Context) error {
-	go func() { <-ctx.Done(); _ = s.conn.Close() }()
+	go func() {
+		<-ctx.Done()
+		_ = s.conn.Close()
+	}()
 	buf := make([]byte, protocol.HeaderSize+protocol.MaxUDPPayload)
 	for {
-		n, addr, err := s.conn.ReadFromUDP(buf)
+		n, remoteAddr, err := s.conn.ReadFromUDP(buf)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
@@ -64,44 +90,94 @@ func (s *UDPHandshakeServer) Serve(ctx context.Context) error {
 		if err != nil {
 			continue
 		}
-		key := addr.String()
+		clientKey := remoteAddr.String()
 		if pkt.Hdr.HasFlag(protocol.FlagSYN) {
-			id, ok := s.sessions[key]
-			if !ok {
-				id, err = transport.GenerateConnectionID()
-				if err != nil {
-					continue
-				}
-				s.sessions[key] = id
-			}
-			response := &protocol.Packet{Hdr: protocol.Header{Version: protocol.ProtocolVersion, Flags: protocol.FlagSYN | protocol.FlagACK, MsgType: protocol.MsgCtrlHandshake, StreamID: protocol.StreamControl, ConnectionID: id, AckNum: 1, WindowSize: protocol.DefaultWindowSize}}
-			if s.dropHook != nil && s.dropHook("out", response) {
-				continue
-			}
-			raw, _ := protocol.MarshalPacket(response)
-			_, _ = s.conn.WriteToUDP(raw, addr)
+			s.handleInboundSYN(remoteAddr, clientKey)
 			continue
 		}
-		id, ok := s.sessions[key]
-		if !ok || id != pkt.Hdr.ConnectionID {
-			if pkt.Hdr.HasFlag(protocol.FlagRST) {
-				continue
-			}
-			reset := &protocol.Packet{Hdr: protocol.Header{Version: protocol.ProtocolVersion, Flags: protocol.FlagRST, MsgType: protocol.MsgCtrlHandshake, ConnectionID: pkt.Hdr.ConnectionID}}
-			raw, _ := protocol.MarshalPacket(reset)
-			_, _ = s.conn.WriteToUDP(raw, addr)
-			continue
-		}
-		if pkt.Hdr.HasFlag(protocol.FlagFIN) {
-			response := &protocol.Packet{Hdr: protocol.Header{Version: protocol.ProtocolVersion, Flags: protocol.FlagFIN | protocol.FlagACK, MsgType: protocol.MsgCtrlHandshake, StreamID: protocol.StreamControl, ConnectionID: id, SeqNum: 1, AckNum: pkt.Hdr.SeqNum + 1, WindowSize: protocol.DefaultWindowSize}}
-			raw, _ := protocol.MarshalPacket(response)
-			_, _ = s.conn.WriteToUDP(raw, addr)
-			delete(s.sessions, key)
-		}
+		s.handleInboundSubsequent(remoteAddr, clientKey, pkt)
 	}
 }
 
-// PerformUDPHandshake executes a retransmitting client handshake and graceful close.
+// handleInboundSYN allocates one state machine per remote address; duplicate SYNs reuse it.
+func (s *UDPHandshakeServer) handleInboundSYN(remoteAddr *net.UDPAddr, clientKey string) {
+	s.mu.Lock()
+	sm, exists := s.sessions[clientKey]
+	if !exists {
+		connID, err := transport.GenerateConnectionID()
+		if err != nil {
+			s.mu.Unlock()
+			return
+		}
+		sm = NewServerStateMachine()
+		s.sessions[clientKey] = sm
+		s.idToAddr[connID] = clientKey
+		_ = sm.AcceptSYN(connID)
+	}
+	connID := sm.ConnectionID()
+	s.mu.Unlock()
+
+	synAck := &protocol.Packet{
+		Hdr: protocol.Header{
+			Version:      protocol.ProtocolVersion,
+			Flags:        protocol.FlagSYN | protocol.FlagACK,
+			MsgType:      protocol.MsgCtrlHandshake,
+			StreamID:     protocol.StreamControl,
+			ConnectionID: connID,
+			AckNum:       1,
+			WindowSize:   protocol.DefaultWindowSize,
+		},
+	}
+	if s.dropHook != nil && s.dropHook("out", synAck) {
+		return
+	}
+	raw, err := protocol.MarshalPacket(synAck)
+	if err == nil {
+		_, _ = s.conn.WriteToUDP(raw, remoteAddr)
+	}
+}
+
+// handleInboundSubsequent rejects unknown IDs and delegates valid packets to the state machine.
+func (s *UDPHandshakeServer) handleInboundSubsequent(remoteAddr *net.UDPAddr, clientKey string, pkt *protocol.Packet) {
+	s.mu.RLock()
+	sm, exists := s.sessions[clientKey]
+	valid := exists && sm.ConnectionID() == pkt.Hdr.ConnectionID
+	s.mu.RUnlock()
+	if !valid {
+		if pkt.Hdr.HasFlag(protocol.FlagRST) {
+			return
+		}
+		rst := &protocol.Packet{
+			Hdr: protocol.Header{
+				Version:      protocol.ProtocolVersion,
+				Flags:        protocol.FlagRST,
+				MsgType:      protocol.MsgCtrlHandshake,
+				StreamID:     protocol.StreamControl,
+				ConnectionID: pkt.Hdr.ConnectionID,
+			},
+		}
+		raw, err := protocol.MarshalPacket(rst)
+		if err == nil {
+			_, _ = s.conn.WriteToUDP(raw, remoteAddr)
+		}
+		return
+	}
+	action := sm.OnPacket(pkt)
+	if action.Packet != nil {
+		raw, err := protocol.MarshalPacket(action.Packet)
+		if err == nil {
+			_, _ = s.conn.WriteToUDP(raw, remoteAddr)
+		}
+	}
+	if sm.State() == transport.StateCloseReady {
+		s.mu.Lock()
+		delete(s.sessions, clientKey)
+		delete(s.idToAddr, sm.ConnectionID())
+		s.mu.Unlock()
+	}
+}
+
+// PerformUDPHandshake runs the client state machine with bounded SYN retransmission.
 func PerformUDPHandshake(ctx context.Context, serverAddr string, cfg ...UDPConfig) (*tcp_handshake.HandshakeResult, error) {
 	timeout := HandshakeTimeout
 	var hook func(string, *protocol.Packet) bool
@@ -111,64 +187,90 @@ func PerformUDPHandshake(ctx context.Context, serverAddr string, cfg ...UDPConfi
 		}
 		hook = cfg[0].PacketDropHook
 	}
-	addr, err := net.ResolveUDPAddr("udp", serverAddr)
+	rAddr, err := net.ResolveUDPAddr("udp", serverAddr)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("rudp client: resolve server addr failed: %w", err)
 	}
 	conn, err := net.ListenUDP("udp", nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("rudp client: bind local socket failed: %w", err)
 	}
 	defer conn.Close()
-	if err = configureUDPSocket(conn); err != nil {
-		return nil, err
+	if err := configureUDPSocket(conn); err != nil {
+		return nil, fmt.Errorf("rudp client: configure socket failed: %w", err)
 	}
 	started := time.Now()
-	syn := &protocol.Packet{Hdr: protocol.Header{Version: protocol.ProtocolVersion, Flags: protocol.FlagSYN, MsgType: protocol.MsgCtrlHandshake, StreamID: protocol.StreamControl, WindowSize: protocol.DefaultWindowSize}}
-	raw, _ := protocol.MarshalPacket(syn)
+	client := NewClientStateMachine()
+	synAction := client.Connect()
+	synRaw, err := protocol.MarshalPacket(synAction.Packet)
+	if err != nil {
+		return nil, fmt.Errorf("rudp client: marshal syn failed: %w", err)
+	}
+	buf := make([]byte, protocol.HeaderSize+protocol.MaxUDPPayload)
 	var welcome *protocol.Packet
-	var n int
 	for attempt := 0; attempt <= MaxHandshakeRetries; attempt++ {
-		if hook == nil || !hook("out", syn) {
-			if _, err = conn.WriteToUDP(raw, addr); err != nil {
-				return nil, err
+		if hook == nil || !hook("out", synAction.Packet) {
+			if _, err := conn.WriteToUDP(synRaw, rAddr); err != nil {
+				return nil, fmt.Errorf("rudp client: send syn failed: %w", err)
 			}
 		}
 		_ = conn.SetReadDeadline(time.Now().Add(timeout))
-		buf := make([]byte, protocol.HeaderSize+protocol.MaxUDPPayload)
 		n, _, readErr := conn.ReadFromUDP(buf)
 		if readErr == nil {
-			welcome, err = protocol.UnmarshalPacket(buf[:n])
-			if err == nil && welcome.Hdr.HasFlag(protocol.FlagSYN) && welcome.Hdr.HasFlag(protocol.FlagACK) {
+			parsed, parseErr := protocol.UnmarshalPacket(buf[:n])
+			if parseErr == nil && parsed.Hdr.HasFlag(protocol.FlagSYN) && parsed.Hdr.HasFlag(protocol.FlagACK) {
+				welcome = parsed
 				break
 			}
 		}
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
+		if attempt < MaxHandshakeRetries {
+			_ = client.OnHandshakeTimeout()
+		}
 	}
 	if welcome == nil || welcome.Hdr.ConnectionID == 0 {
-		return nil, fmt.Errorf("UDP handshake timed out")
+		return nil, fmt.Errorf("rudp client: handshake timed out after %d retries", MaxHandshakeRetries)
 	}
-	ack := controlPacket(protocol.FlagACK, welcome.Hdr.ConnectionID, 1, 1)
-	ackRaw, _ := protocol.MarshalPacket(ack)
-	if _, err = conn.WriteToUDP(ackRaw, addr); err != nil {
-		return nil, err
+	ackAction := client.OnPacket(welcome)
+	if ackAction.Packet == nil {
+		return nil, fmt.Errorf("rudp client: state machine rejected syn-ack")
 	}
-	fin := controlPacket(protocol.FlagFIN, welcome.Hdr.ConnectionID, 2, 1)
-	finRaw, _ := protocol.MarshalPacket(fin)
-	if _, err = conn.WriteToUDP(finRaw, addr); err != nil {
-		return nil, err
+	ackRaw, err := protocol.MarshalPacket(ackAction.Packet)
+	if err != nil {
+		return nil, fmt.Errorf("rudp client: marshal ack failed: %w", err)
+	}
+	if _, err = conn.WriteToUDP(ackRaw, rAddr); err != nil {
+		return nil, fmt.Errorf("rudp client: send ack failed: %w", err)
+	}
+	finAction := client.Disconnect()
+	if finAction.Packet == nil {
+		return nil, fmt.Errorf("rudp client: state machine rejected disconnect")
+	}
+	finRaw, err := protocol.MarshalPacket(finAction.Packet)
+	if err != nil {
+		return nil, fmt.Errorf("rudp client: marshal fin failed: %w", err)
+	}
+	if _, err = conn.WriteToUDP(finRaw, rAddr); err != nil {
+		return nil, fmt.Errorf("rudp client: send fin failed: %w", err)
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(timeout))
-	buf := make([]byte, protocol.HeaderSize+protocol.MaxUDPPayload)
-	n, _, err = conn.ReadFromUDP(buf)
+	n, _, err := conn.ReadFromUDP(buf)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("rudp client: wait for fin-ack failed: %w", err)
 	}
 	finAck, err := protocol.UnmarshalPacket(buf[:n])
-	if err != nil || !finAck.Hdr.HasFlag(protocol.FlagFIN) {
-		return nil, fmt.Errorf("invalid UDP FIN-ACK")
+	if err != nil || !finAck.Hdr.HasFlag(protocol.FlagFIN) || !finAck.Hdr.HasFlag(protocol.FlagACK) {
+		return nil, fmt.Errorf("rudp client: invalid fin-ack packet received")
 	}
-	return &tcp_handshake.HandshakeResult{ConnectionID: welcome.Hdr.ConnectionID, ServerAddr: serverAddr, LocalAddr: conn.LocalAddr().String(), RTTMillis: time.Since(started).Milliseconds(), RTTMicros: time.Since(started).Microseconds(), WelcomeMsg: protocol.DefaultWelcomeMessage}, nil
+	_ = client.OnPacket(finAck)
+	return &tcp_handshake.HandshakeResult{
+		ConnectionID: welcome.Hdr.ConnectionID,
+		ServerAddr:   serverAddr,
+		LocalAddr:    conn.LocalAddr().String(),
+		RTTMillis:    time.Since(started).Milliseconds(),
+		RTTMicros:    time.Since(started).Microseconds(),
+		WelcomeMsg:   protocol.DefaultWelcomeMessage,
+	}, nil
 }
