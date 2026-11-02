@@ -6,9 +6,15 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"sync"
 
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/protocol"
 )
+
+var generatedIDs = struct {
+	sync.Mutex
+	values map[uint32]struct{}
+}{values: make(map[uint32]struct{})}
 
 // ConnState describes the lifecycle of a client or server session.
 type ConnState uint8
@@ -27,7 +33,7 @@ func (s ConnState) String() string {
 	if int(s) < len(names) {
 		return names[s]
 	}
-	return "UNKNOWN"
+	return fmt.Sprintf("UNKNOWN(%d)", s)
 }
 
 // CloseReason identifies why a session ended.
@@ -47,7 +53,7 @@ func (r CloseReason) String() string {
 	if int(r) < len(names) {
 		return names[r]
 	}
-	return "UNKNOWN"
+	return fmt.Sprintf("UNKNOWN(%d)", r)
 }
 
 // Session is the common connection contract used by later transport layers.
@@ -63,13 +69,21 @@ type Session interface {
 // GenerateConnectionID returns a non-zero cryptographically random identifier.
 func GenerateConnectionID() (uint32, error) {
 	var raw [4]byte
-	for attempt := 0; attempt < 8; attempt++ {
+	for attempt := 0; attempt < 32; attempt++ {
 		if _, err := rand.Read(raw[:]); err != nil {
 			return 0, fmt.Errorf("generate connection id: %w", err)
 		}
 		if id := binary.BigEndian.Uint32(raw[:]); id != 0 {
-			return id, nil
+			generatedIDs.Lock()
+			_, exists := generatedIDs.values[id]
+			if !exists {
+				generatedIDs.values[id] = struct{}{}
+			}
+			generatedIDs.Unlock()
+			if !exists {
+				return id, nil
+			}
 		}
 	}
-	return 0, fmt.Errorf("generate connection id: random source returned zero repeatedly")
+	return 0, fmt.Errorf("generate connection id: random source returned unusable values repeatedly")
 }
