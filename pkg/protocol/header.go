@@ -41,7 +41,17 @@ func UnmarshalHeader(buf []byte) (Header, error) {
 	if buf[0] != ProtocolVersion {
 		return Header{}, ErrUnsupportedVersion
 	}
-	return Header{Version: buf[0], Flags: buf[1], MsgType: buf[2], StreamID: buf[3], ConnectionID: binary.BigEndian.Uint32(buf[4:8]), SeqNum: binary.BigEndian.Uint32(buf[8:12]), AckNum: binary.BigEndian.Uint32(buf[12:16]), AckBitmap: binary.BigEndian.Uint16(buf[16:18]), WindowSize: binary.BigEndian.Uint16(buf[18:20])}, nil
+	return Header{
+		Version: buf[0], 
+		Flags: buf[1], 
+		MsgType: buf[2], 
+		StreamID: buf[3], 
+		ConnectionID: binary.BigEndian.Uint32(buf[4:8]), 
+		SeqNum: binary.BigEndian.Uint32(buf[8:12]), 
+		AckNum: binary.BigEndian.Uint32(buf[12:16]), 
+		AckBitmap: binary.BigEndian.Uint16(buf[16:18]), 
+		WindowSize: binary.BigEndian.Uint16(buf[18:20]),
+	}, nil
 }
 
 // HasFlag reports whether a control bit is set.
