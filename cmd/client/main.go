@@ -4,13 +4,15 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"github.com/khaivutri/network-app-streaming-collaboration/pkg/transport/rudp"
-	"github.com/khaivutri/network-app-streaming-collaboration/pkg/transport/tcp_handshake"
 	"os"
 	"time"
+
+	"github.com/khaivutri/network-app-streaming-collaboration/pkg/transport/rudp"
+	"github.com/khaivutri/network-app-streaming-collaboration/pkg/transport/tcp_handshake"
 )
 
 func main() {
+	// use as new branch
 	mode := flag.String("mode", "step2-tcp", "transport mode")
 	server := flag.String("server", "127.0.0.1:9000", "server address")
 	timeout := flag.Duration("timeout", 5*time.Second, "handshake timeout")
