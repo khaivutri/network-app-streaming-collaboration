@@ -53,11 +53,11 @@ func (c *AuthClient) Login(ctx context.Context, username, password string) (prot
 func (c *AuthClient) Logout(ctx context.Context, username string) (protocol.LogoutResponsePayload, error) {
 	requestID := fmt.Sprintf("logout-%d", time.Now().UnixNano())
 	if err := c.send(ctx, protocol.MsgLogout, protocol.LogoutPayload{
-			RequestID: requestID, 
-			Username: username, 
-			Reason: "USER_INITIATED", 
-			Timestamp: time.Now().UnixMilli(),
-		}); err != nil {
+		RequestID: requestID,
+		Username:  username,
+		Reason:    "USER_INITIATED",
+		Timestamp: time.Now().UnixMilli(),
+	}); err != nil {
 		c.store.ClearSession()
 		return protocol.LogoutResponsePayload{}, err
 	}
@@ -78,15 +78,15 @@ func (c *AuthClient) send(ctx context.Context, msgType uint8, value any) error {
 		return err
 	}
 	raw, err := protocol.MarshalPacket(&protocol.Packet{
-			Hdr: protocol.Header{
-				Version: protocol.ProtocolVersion, 
-				Flags: protocol.FlagREL | protocol.FlagORD, 
-				MsgType: msgType, 
-				StreamID: protocol.StreamControl, 
-				ConnectionID: c.connectionID, 
-				WindowSize: protocol.DefaultWindowSize,
-			}, Payload: payload,
-		})
+		Hdr: protocol.Header{
+			Version:      protocol.ProtocolVersion,
+			Flags:        protocol.FlagREL | protocol.FlagORD,
+			MsgType:      msgType,
+			StreamID:     protocol.StreamControl,
+			ConnectionID: c.connectionID,
+			WindowSize:   protocol.DefaultWindowSize,
+		}, Payload: payload,
+	})
 	if err != nil {
 		return err
 	}

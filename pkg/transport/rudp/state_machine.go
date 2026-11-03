@@ -298,13 +298,13 @@ func (m *ServerStateMachine) OnCleanupTimeout() Action {
 func controlPacket(flags uint8, id, seq, ack uint32) *protocol.Packet {
 	return &protocol.Packet{
 		Hdr: protocol.Header{
-			Version: protocol.ProtocolVersion, 
-			Flags: flags, 
-			MsgType: protocol.MsgCtrlHandshake, 
-			StreamID: protocol.StreamControl, 
-			ConnectionID: id, 
-			SeqNum: seq, 
-			AckNum: ack, 
-			WindowSize: protocol.DefaultWindowSize,
+			Version:      protocol.ProtocolVersion,
+			Flags:        flags,
+			MsgType:      protocol.MsgCtrlHandshake,
+			StreamID:     protocol.StreamControl,
+			ConnectionID: id,
+			SeqNum:       seq,
+			AckNum:       ack,
+			WindowSize:   protocol.DefaultWindowSize,
 		}}
 }

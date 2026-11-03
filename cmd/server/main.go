@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"github.com/khaivutri/network-app-streaming-collaboration/internal/server"
 	"github.com/khaivutri/network-app-streaming-collaboration/internal/server/handlers"
 	"github.com/khaivutri/network-app-streaming-collaboration/internal/server/state"
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/protocol"
@@ -40,6 +41,14 @@ func main() {
 		err = s.Serve(ctx)
 	} else if *mode == "step3-auth" {
 		err = serveAuth(ctx, *addr, *users)
+	} else if *mode == "step4-concurrency" {
+		srvApp, srvErr := server.NewServerApp(*addr, *users)
+		if srvErr != nil {
+			err = srvErr
+		} else {
+			fmt.Printf("Step 4 Concurrency Server listening on %s\n", srvApp.Addr())
+			err = srvApp.Serve(ctx)
+		}
 	} else {
 		err = fmt.Errorf("unsupported mode %q", *mode)
 	}

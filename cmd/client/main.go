@@ -21,6 +21,7 @@ func main() {
 	server := flag.String("server", "127.0.0.1:9000", "server address")
 	user := flag.String("user", "", "authentication username")
 	pass := flag.String("pass", "", "authentication password")
+	count := flag.Int("count", 20, "concurrent client count")
 	timeout := flag.Duration("timeout", 5*time.Second, "handshake timeout")
 	flag.Parse()
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
@@ -58,6 +59,15 @@ func main() {
 				}
 			}
 		}
+	} else if *mode == "step4-concurrency" {
+		results := client.RunConcurrentClients(ctx, *server, *count, *user, *pass)
+		for _, result := range results {
+			if result.Err != nil {
+				fmt.Printf("client[%d] error=%v\n", result.Index, result.Err)
+				continue
+			}
+			fmt.Printf("client[%d] conn=0x%08X auth=%s\n", result.Index, result.ConnectionID, result.AuthCode)
+		}
 	} else {
 		err = fmt.Errorf("unsupported mode %q", *mode)
 	}
@@ -65,7 +75,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	if *mode == "step3-auth" {
+	if *mode == "step3-auth" || *mode == "step4-concurrency" {
 		return
 	}
 	fmt.Printf("Mode: %s\nLocalAddr -> ServerAddr: %s -> %s\nAssigned ConnectionID: 0x%08X (%d)\nServer Acknowledgment Message: %s\nRound-Trip Time (RTT): %d ms / %d µs\nFinal State: CONNECTED -> Gracefully Closed (FIN/FIN-ACK)\n", *mode, r.LocalAddr, r.ServerAddr, r.ConnectionID, r.ConnectionID, r.WelcomeMsg, r.RTTMillis, r.RTTMicros)
