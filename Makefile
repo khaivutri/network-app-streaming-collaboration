@@ -7,7 +7,7 @@ ADDR ?= :9000
 SERVER ?= 127.0.0.1:9000
 
 .DEFAULT_GOAL := help
-.PHONY: help fmt fmt-check vet test test-proto test-tcp test-rudp test-int race cover check build server-tcp client-tcp server-udp client-udp server-step3-auth client-step3-auth smoke-tcp smoke-udp clean
+.PHONY: help fmt fmt-check vet test test-proto test-tcp test-rudp test-int race cover check build server-tcp client-tcp server-udp client-udp server-step3-auth client-step3-auth server-step4-concurrency client-step4-concurrency test-step4 smoke-step4 smoke-tcp smoke-udp clean
 
 help: ## Show available commands
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
@@ -47,9 +47,17 @@ server-udp: ## Run UDP server
 client-udp: ## Run UDP client
 	$(GO) run ./cmd/client --mode=rudp --server=$(SERVER)
 server-step3-auth: ## Run Step 3 authentication server
-	go run ./cmd/server --mode=step3-auth --addr=127.0.0.1:9000 --users=configs/users.json
+	$(GO)  run ./cmd/server --mode=step3-auth --addr=$(ADDR) --users=configs/users.json
 client-step3-auth: ## Run Step 3 authentication client
-	go run ./cmd/client --mode=step3-auth --server=127.0.0.1:9000 --user=hung.vo --pass=Password@123
+	$(GO)  run ./cmd/client --mode=step3-auth --server=$(SERVER) --user=hung.vo --pass=Password@123
+server-step4-concurrency: ## Run Step 4 concurrent server
+	$(GO) run ./cmd/server --mode=step4-concurrency --addr=$(ADDR) --users=configs/users.json
+client-step4-concurrency: ## Run Step 4 concurrent clients
+	$(GO) run ./cmd/client --mode=step4-concurrency --server=$(SERVER) --count=20 --user=Alice --pass=Alice@123
+test-step4: ## Run Step 4 concurrency tests with race detector
+	$(GO) test -v -race -run=TestStep4 ./tests/integration/...
+smoke-step4: build ## Run Step 4 end-to-end smoke test
+	@./$(BIN_DIR)/server --mode=step4-concurrency --addr=127.0.0.1:19004 --users=configs/users.json & SRV_PID=$$!; trap "kill $$SRV_PID 2>/dev/null || true" EXIT; sleep 0.5; $(GO) test -v -race -run=TestStep4_ConcurrentHandshakeAndAuth_25Clients ./tests/integration/...
 smoke-tcp: build ## Run TCP smoke test
 	@./$(BIN_DIR)/server --mode=step2-tcp --addr=127.0.0.1:19000 & SRV_PID=$$!; trap "kill $$SRV_PID 2>/dev/null || true" EXIT; sleep 0.5; ./$(BIN_DIR)/client --mode=step2-tcp --server=127.0.0.1:19000
 smoke-udp: build ## Run UDP smoke test
