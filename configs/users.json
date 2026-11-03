@@ -1,0 +1,35 @@
+{
+  "version": "1.0",
+  "users": [
+    {
+      "username": "hung.vo",
+      "password": "Password@123",
+      "display_name": "hung.vo",
+      "active": true
+    },
+    {
+      "username": "Alice",
+      "password": "Alice@123",
+      "display_name": "Alice",
+      "active": true
+    },
+    {
+      "username": "Bob",
+      "password": "Bob@123",
+      "display_name": "Bob",
+      "active": true
+    },
+    {
+      "username": "Charlie",
+      "password": "Charlie@123",
+      "display_name": "Charlie",
+      "active": true
+    },
+    {
+      "username": "David",
+      "password": "David@123",
+      "display_name": "David",
+      "active": true
+    }
+  ]
+}
