@@ -49,6 +49,14 @@ func main() {
 			fmt.Printf("Step 4 Concurrency Server listening on %s\n", srvApp.Addr())
 			err = srvApp.Serve(ctx)
 		}
+	} else if *mode == "step5-chat" {
+		srvApp, srvErr := server.NewServerApp(*addr, *users)
+		if srvErr != nil {
+			err = srvErr
+		} else {
+			fmt.Printf("Step 5 Streaming & Chat Server listening on %s\n", srvApp.Addr())
+			err = srvApp.Serve(ctx)
+		}
 	} else {
 		err = fmt.Errorf("unsupported mode %q", *mode)
 	}

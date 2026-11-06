@@ -7,7 +7,7 @@ ADDR ?= :9000
 SERVER ?= 127.0.0.1:9000
 
 .DEFAULT_GOAL := help
-.PHONY: help fmt fmt-check vet test test-proto test-tcp test-rudp test-int race cover check build server-tcp client-tcp server-udp client-udp server-step3-auth client-step3-auth server-step4-concurrency client-step4-concurrency test-step4 smoke-step4 smoke-tcp smoke-udp clean
+.PHONY: help fmt fmt-check vet test test-proto test-tcp test-rudp test-int race cover check build server-tcp client-tcp server-udp client-udp server-step3-auth client-step3-auth server-step4-concurrency client-step4-concurrency server-step5-chat client-step5-chat test-step4 test-step5 smoke-step4 smoke-step5 smoke-tcp smoke-udp clean
 
 help: ## Show available commands
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
@@ -58,6 +58,14 @@ test-step4: ## Run Step 4 concurrency tests with race detector
 	$(GO) test -v -race -run=TestStep4 ./tests/integration/...
 smoke-step4: build ## Run Step 4 end-to-end smoke test
 	@./$(BIN_DIR)/server --mode=step4-concurrency --addr=127.0.0.1:19004 --users=configs/users.json & SRV_PID=$$!; trap "kill $$SRV_PID 2>/dev/null || true" EXIT; sleep 0.5; $(GO) test -v -race -run=TestStep4_ConcurrentHandshakeAndAuth_25Clients ./tests/integration/...
+server-step5-chat: ## Run Step 5 streaming and messaging server
+	$(GO) run ./cmd/server --mode=step5-chat --addr=$(ADDR) --users=configs/users.json
+client-step5-chat: ## Run Step 5 interactive chat client
+	$(GO) run ./cmd/client --mode=step5-chat --server=$(SERVER) --user=hung.vo --pass=Password@123
+test-step5: ## Run Step 5 streaming and messaging tests with race detector
+	$(GO) test -v -race -run=TestStep5 ./tests/integration/... ./pkg/protocol/... ./pkg/transport/rudp/... ./internal/client/...
+smoke-step5: build ## Run Step 5 chat smoke test
+	@./$(BIN_DIR)/server --mode=step5-chat --addr=127.0.0.1:19005 --users=configs/users.json & SRV_PID=$$!; trap "kill $$SRV_PID 2>/dev/null || true" EXIT; sleep 0.5; $(GO) test -v -race -run=TestStep5_BroadcastChat_EndToEnd ./tests/integration/...
 smoke-tcp: build ## Run TCP smoke test
 	@./$(BIN_DIR)/server --mode=step2-tcp --addr=127.0.0.1:19000 & SRV_PID=$$!; trap "kill $$SRV_PID 2>/dev/null || true" EXIT; sleep 0.5; ./$(BIN_DIR)/client --mode=step2-tcp --server=127.0.0.1:19000
 smoke-udp: build ## Run UDP smoke test

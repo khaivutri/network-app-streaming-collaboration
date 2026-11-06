@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
@@ -10,9 +11,11 @@ import (
 
 	"github.com/khaivutri/network-app-streaming-collaboration/internal/client"
 	"github.com/khaivutri/network-app-streaming-collaboration/internal/client/state"
+	"github.com/khaivutri/network-app-streaming-collaboration/pkg/protocol"
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/transport"
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/transport/rudp"
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/transport/tcp_handshake"
+	"strings"
 )
 
 func main() {
@@ -68,6 +71,9 @@ func main() {
 			}
 			fmt.Printf("client[%d] conn=0x%08X auth=%s\n", result.Index, result.ConnectionID, result.AuthCode)
 		}
+	} else if *mode == "step5-chat" {
+		returnWithError(runStep5Chat(*server, *user, *pass))
+		return
 	} else {
 		err = fmt.Errorf("unsupported mode %q", *mode)
 	}
@@ -79,4 +85,89 @@ func main() {
 		return
 	}
 	fmt.Printf("Mode: %s\nLocalAddr -> ServerAddr: %s -> %s\nAssigned ConnectionID: 0x%08X (%d)\nServer Acknowledgment Message: %s\nRound-Trip Time (RTT): %d ms / %d µs\nFinal State: CONNECTED -> Gracefully Closed (FIN/FIN-ACK)\n", *mode, r.LocalAddr, r.ServerAddr, r.ConnectionID, r.ConnectionID, r.WelcomeMsg, r.RTTMillis, r.RTTMicros)
+}
+
+func returnWithError(err error) {
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func runStep5Chat(serverAddr, username, password string) error {
+	addr, err := net.ResolveUDPAddr("udp", serverAddr)
+	if err != nil {
+		return fmt.Errorf("chat client resolve server: %w", err)
+	}
+	conn, err := net.ListenUDP("udp", nil)
+	if err != nil {
+		return fmt.Errorf("chat client bind socket: %w", err)
+	}
+	defer conn.Close()
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return err
+	}
+	syn, err := protocol.MarshalPacket(&protocol.Packet{Hdr: protocol.Header{Version: protocol.ProtocolVersion, Flags: protocol.FlagSYN, MsgType: protocol.MsgCtrlHandshake, StreamID: protocol.StreamControl}})
+	if err != nil {
+		return err
+	}
+	if _, err = conn.WriteToUDP(syn, addr); err != nil {
+		return fmt.Errorf("chat client send SYN: %w", err)
+	}
+	buffer := make([]byte, protocol.HeaderSize+protocol.MaxUDPPayload)
+	n, _, err := conn.ReadFromUDP(buffer)
+	if err != nil {
+		return fmt.Errorf("chat client receive SYN-ACK: %w", err)
+	}
+	welcome, err := protocol.UnmarshalPacket(buffer[:n])
+	if err != nil {
+		return err
+	}
+	ack, err := protocol.MarshalPacket(&protocol.Packet{Hdr: protocol.Header{Version: protocol.ProtocolVersion, Flags: protocol.FlagACK, MsgType: protocol.MsgCtrlHandshake, StreamID: protocol.StreamControl, ConnectionID: welcome.Hdr.ConnectionID, AckNum: 1}})
+	if err != nil {
+		return err
+	}
+	if _, err = conn.WriteToUDP(ack, addr); err != nil {
+		return fmt.Errorf("chat client send ACK: %w", err)
+	}
+	if err = conn.SetReadDeadline(time.Time{}); err != nil {
+		return err
+	}
+	store := state.NewClientStore()
+	auth := client.NewAuthClient(conn, addr, welcome.Hdr.ConnectionID, store)
+	loginCtx, cancelLogin := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelLogin()
+	response, err := auth.Login(loginCtx, username, password)
+	if err != nil {
+		return err
+	}
+	if !response.Success {
+		return fmt.Errorf("login failed: %s", response.Message)
+	}
+	chat := client.NewChatClient(conn, addr, welcome.Hdr.ConnectionID, store)
+	chatCtx, cancelChat := context.WithCancel(context.Background())
+	defer cancelChat()
+	go func() { _ = chat.Listen(chatCtx) }()
+	fmt.Println("Connected. Type a message, or /dm <user> <message>; Ctrl+C to exit.")
+	scanner := bufio.NewScanner(os.Stdin)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "/dm ") {
+			parts := strings.SplitN(strings.TrimSpace(strings.TrimPrefix(line, "/dm ")), " ", 2)
+			if len(parts) != 2 {
+				fmt.Println("usage: /dm <user> <message>")
+				continue
+			}
+			_, err = chat.SendDirect(parts[0], parts[1])
+		} else {
+			_, err = chat.SendBroadcast(line)
+		}
+		if err != nil {
+			fmt.Println("send error:", err)
+		}
+	}
+	return scanner.Err()
 }
