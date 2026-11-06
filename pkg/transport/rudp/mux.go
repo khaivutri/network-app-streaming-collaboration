@@ -284,9 +284,7 @@ func (m *Mux) startSession(sess *Session) {
 				if pkt == nil {
 					continue
 				}
-				if m.handler != nil {
-					safeMessage(m.handler, sess, pkt.Hdr.StreamID, pkt.Hdr.MsgType, pkt.Payload)
-				}
+				m.processSessionPacket(sess, pkt)
 			}
 		}
 	}()
@@ -309,6 +307,35 @@ func (m *Mux) startSession(sess *Session) {
 			}
 		}
 	}()
+}
+
+// processSessionPacket applies ACKs and per-stream ordering before dispatching application data.
+func (m *Mux) processSessionPacket(sess *Session, pkt *protocol.Packet) {
+	stream := sess.GetStream(pkt.Hdr.StreamID)
+	if pkt.Hdr.HasFlag(protocol.FlagACK) || pkt.Hdr.MsgType == protocol.MsgAck {
+		stream.ProcessAck(pkt.Hdr.AckNum, pkt.Hdr.AckBitmap, pkt.Hdr.WindowSize)
+	}
+	if pkt.Hdr.MsgType == protocol.MsgAck {
+		return
+	}
+	// Sequence zero is retained for the pre-Step-5 auth/presence wire messages.
+	if !pkt.Hdr.HasFlag(protocol.FlagREL) || pkt.Hdr.SeqNum == 0 {
+		if m.handler != nil {
+			safeMessage(m.handler, sess, pkt.Hdr.StreamID, pkt.Hdr.MsgType, pkt.Payload)
+		}
+		return
+	}
+	delivered, needAck := stream.ProcessIncomingPacket(pkt)
+	if needAck {
+		if err := sess.SendAck(pkt.Hdr.StreamID); err != nil {
+			slog.Debug("rudp ACK enqueue failed", "conn_id", sess.ID(), "error", err)
+		}
+	}
+	for _, item := range delivered {
+		if m.handler != nil {
+			safeMessage(m.handler, sess, item.Hdr.StreamID, item.Hdr.MsgType, item.Payload)
+		}
+	}
 }
 
 func (m *Mux) sendSYNACK(id uint32, addr *net.UDPAddr) {

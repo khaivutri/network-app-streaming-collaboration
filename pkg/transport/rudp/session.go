@@ -2,6 +2,7 @@ package rudp
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -23,6 +24,8 @@ type Session struct {
 	closeErr   string
 	ctx        context.Context
 	cancel     context.CancelFunc
+	streamsMu  sync.RWMutex
+	streams    map[uint8]*Stream
 }
 
 // NewSession creates a session with bounded inbound and outbound queues.
@@ -40,6 +43,11 @@ func NewSession(id uint32, remoteAddr *net.UDPAddr, queueSize int, parentCtx con
 		lastActive: time.Now(),
 		ctx:        sessCtx,
 		cancel:     cancel,
+		streams: map[uint8]*Stream{
+			protocol.StreamControl:       NewStream(protocol.StreamControl, protocol.DefaultWindowSize),
+			protocol.StreamBroadcastChat: NewStream(protocol.StreamBroadcastChat, protocol.DefaultWindowSize),
+			protocol.StreamDirectChat:    NewStream(protocol.StreamDirectChat, protocol.DefaultWindowSize),
+		},
 	}
 }
 
@@ -121,6 +129,79 @@ func (s *Session) EnqueueOutbound(rawPacket []byte) bool {
 	default:
 		return false
 	}
+}
+
+// GetStream returns the lazily-created reliable stream for streamID.
+func (s *Session) GetStream(streamID uint8) *Stream {
+	s.streamsMu.RLock()
+	stream := s.streams[streamID]
+	s.streamsMu.RUnlock()
+	if stream != nil {
+		return stream
+	}
+	s.streamsMu.Lock()
+	defer s.streamsMu.Unlock()
+	if stream = s.streams[streamID]; stream == nil {
+		stream = NewStream(streamID, protocol.DefaultWindowSize)
+		s.streams[streamID] = stream
+	}
+	return stream
+}
+
+// SendReliable assigns a per-stream sequence number and queues a reliable packet.
+func (s *Session) SendReliable(streamID uint8, msgType uint8, payload []byte) error {
+	stream := s.GetStream(streamID)
+	seq := stream.NextSeqNum()
+	ackNum, ackBitmap, window := stream.ComputeAckState()
+	pkt := &protocol.Packet{
+		Hdr: protocol.Header{
+			Version:      protocol.ProtocolVersion,
+			Flags:        protocol.FlagREL | protocol.FlagORD | protocol.FlagACK,
+			MsgType:      msgType,
+			StreamID:     streamID,
+			ConnectionID: s.ID(),
+			SeqNum:       seq,
+			AckNum:       ackNum,
+			AckBitmap:    ackBitmap,
+			WindowSize:   window,
+		},
+		Payload: append([]byte(nil), payload...),
+	}
+	raw, err := protocol.MarshalPacket(pkt)
+	if err != nil {
+		return fmt.Errorf("rudp: marshal reliable packet: %w", err)
+	}
+	stream.RecordSent(pkt, raw)
+	if !s.EnqueueOutbound(raw) {
+		return fmt.Errorf("rudp: session %d outbound queue full", s.ID())
+	}
+	return nil
+}
+
+// SendAck queues an ACK-only packet without consuming the reliable send sequence.
+func (s *Session) SendAck(streamID uint8) error {
+	stream := s.GetStream(streamID)
+	ackNum, ackBitmap, window := stream.ComputeAckState()
+	pkt := &protocol.Packet{
+		Hdr: protocol.Header{
+			Version:      protocol.ProtocolVersion,
+			Flags:        protocol.FlagACK,
+			MsgType:      protocol.MsgAck,
+			StreamID:     streamID,
+			ConnectionID: s.ID(),
+			AckNum:       ackNum,
+			AckBitmap:    ackBitmap,
+			WindowSize:   window,
+		},
+	}
+	raw, err := protocol.MarshalPacket(pkt)
+	if err != nil {
+		return fmt.Errorf("rudp: marshal ACK: %w", err)
+	}
+	if !s.EnqueueOutbound(raw) {
+		return fmt.Errorf("rudp: session %d ACK queue full", s.ID())
+	}
+	return nil
 }
 
 // IsClosed reports whether Close has completed its state transition.
