@@ -7,15 +7,22 @@ import (
 
 // ClientStore is the concurrency-safe local projection of server presence.
 type ClientStore struct {
-	mu          sync.RWMutex
-	isLoggedIn  bool
-	currentUser *protocol.UserInfoDTO
-	onlinePeers map[string]protocol.PeerDTO
+	mu             sync.RWMutex
+	isLoggedIn     bool
+	currentUser    *protocol.UserInfoDTO
+	onlinePeers    map[string]protocol.PeerDTO
+	bcastMessages  []protocol.BroadcastMessageServerPayload
+	directMessages map[string][]protocol.UnicastMessageServerPayload
+	deliveryStatus map[string]string
 }
 
 // NewClientStore creates an empty unauthenticated projection.
 func NewClientStore() *ClientStore {
-	return &ClientStore{onlinePeers: make(map[string]protocol.PeerDTO)}
+	return &ClientStore{
+		onlinePeers:    make(map[string]protocol.PeerDTO),
+		directMessages: make(map[string][]protocol.UnicastMessageServerPayload),
+		deliveryStatus: make(map[string]string),
+	}
 }
 
 // SetLoginSuccess replaces stale presence with the server snapshot.
@@ -30,6 +37,9 @@ func (cs *ClientStore) SetLoginSuccess(user *protocol.UserInfoDTO, peers []proto
 		cs.currentUser = nil
 	}
 	clear(cs.onlinePeers)
+	cs.bcastMessages = nil
+	clear(cs.directMessages)
+	clear(cs.deliveryStatus)
 	for _, peer := range peers {
 		cs.onlinePeers[peer.Username] = peer
 	}
@@ -79,4 +89,56 @@ func (cs *ClientStore) GetOnlinePeers() []protocol.PeerDTO {
 		peers = append(peers, peer)
 	}
 	return peers
+}
+
+// AppendBroadcastMessage adds one room message in receive order.
+func (cs *ClientStore) AppendBroadcastMessage(message protocol.BroadcastMessageServerPayload) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cs.bcastMessages = append(cs.bcastMessages, message)
+	if message.ClientMsgID != "" && message.Sender != "" {
+		cs.deliveryStatus[message.ClientMsgID] = "DELIVERED"
+	}
+}
+
+// AppendDirectMessage adds one direct message under the other participant's username.
+func (cs *ClientStore) AppendDirectMessage(message protocol.UnicastMessageServerPayload) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	peer := message.Sender
+	if current := cs.currentUser; current != nil && message.Sender == current.Username {
+		peer = message.Recipient
+	}
+	cs.directMessages[peer] = append(cs.directMessages[peer], message)
+	if message.ClientMsgID != "" {
+		cs.deliveryStatus[message.ClientMsgID] = "DELIVERED"
+	}
+}
+
+// GetBroadcastMessages returns a detached room-message snapshot.
+func (cs *ClientStore) GetBroadcastMessages() []protocol.BroadcastMessageServerPayload {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return append([]protocol.BroadcastMessageServerPayload(nil), cs.bcastMessages...)
+}
+
+// GetDirectMessages returns a detached direct-message snapshot for peer.
+func (cs *ClientStore) GetDirectMessages(peer string) []protocol.UnicastMessageServerPayload {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return append([]protocol.UnicastMessageServerPayload(nil), cs.directMessages[peer]...)
+}
+
+// MarkDelivered updates the local receipt shown for a client-generated message.
+func (cs *ClientStore) MarkDelivered(clientMsgID string) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cs.deliveryStatus[clientMsgID] = "DELIVERED"
+}
+
+// DeliveryStatus returns the receipt state for a client message.
+func (cs *ClientStore) DeliveryStatus(clientMsgID string) string {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.deliveryStatus[clientMsgID]
 }
