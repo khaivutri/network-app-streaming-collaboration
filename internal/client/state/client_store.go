@@ -1,8 +1,10 @@
 package state
 
 import (
-	"github.com/khaivutri/network-app-streaming-collaboration/pkg/protocol"
 	"sync"
+
+	"github.com/khaivutri/network-app-streaming-collaboration/internal/client/transfer"
+	"github.com/khaivutri/network-app-streaming-collaboration/pkg/protocol"
 )
 
 // ClientStore is the concurrency-safe local projection of server presence.
@@ -14,6 +16,7 @@ type ClientStore struct {
 	bcastMessages  []protocol.BroadcastMessageServerPayload
 	directMessages map[string][]protocol.UnicastMessageServerPayload
 	deliveryStatus map[string]string
+	fileTransfers  map[string]*transfer.TransferProgress
 }
 
 // NewClientStore creates an empty unauthenticated projection.
@@ -22,7 +25,31 @@ func NewClientStore() *ClientStore {
 		onlinePeers:    make(map[string]protocol.PeerDTO),
 		directMessages: make(map[string][]protocol.UnicastMessageServerPayload),
 		deliveryStatus: make(map[string]string),
+		fileTransfers:  make(map[string]*transfer.TransferProgress),
 	}
+}
+
+// UpdateFileProgress stores a detached file-transfer progress snapshot.
+func (cs *ClientStore) UpdateFileProgress(progress *transfer.TransferProgress) {
+	if progress == nil {
+		return
+	}
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	copy := *progress
+	cs.fileTransfers[progress.TransferID] = &copy
+}
+
+// GetFileProgress returns a detached file-transfer progress snapshot.
+func (cs *ClientStore) GetFileProgress(id string) (*transfer.TransferProgress, bool) {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	progress, ok := cs.fileTransfers[id]
+	if !ok || progress == nil {
+		return nil, false
+	}
+	copy := *progress
+	return &copy, true
 }
 
 // SetLoginSuccess replaces stale presence with the server snapshot.
