@@ -11,6 +11,14 @@ var (
 )
 
 const (
+	FileCodeReady            = "FILE_READY"
+	FileCodeStorageError     = "FILE_STORAGE_ERROR"
+	FileCodeRejected         = "FILE_REJECTED"
+	FileCodeChecksumMismatch = "FILE_CHECKSUM_MISMATCH"
+	FileCodeUserCancelled    = "USER_CANCELLED"
+	FileCodePeerDisconnected = "PEER_DISCONNECTED"
+	FileCodeChecksumFailed   = "CHECKSUM_FAILED"
+
 	// ErrCodeMsgEmptyContent identifies a blank chat message.
 	ErrCodeMsgEmptyContent = "MSG_EMPTY_CONTENT"
 	// ErrCodeMsgSelfRecipient identifies an attempted direct message to oneself.
