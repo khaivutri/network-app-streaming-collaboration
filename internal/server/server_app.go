@@ -20,6 +20,7 @@ type ServerApp struct {
 	router    *dispatcher.Router
 	credStore *state.CredentialStore
 	chatHdl   *handlers.ChatHandler
+	fileHdl   *handlers.FileRelayHandler
 }
 
 // NewServerApp creates a Step 4 server bound to listenAddr.
@@ -32,6 +33,7 @@ func NewServerApp(listenAddr, usersPath string) (*ServerApp, error) {
 		router:    dispatcher.NewRouter(),
 		credStore: credStore,
 		chatHdl:   handlers.NewChatHandler(),
+		fileHdl:   handlers.NewFileRelayHandler(),
 	}
 	mux, err := rudp.NewMux(rudp.DefaultMuxConfig(listenAddr), app)
 	if err != nil {
@@ -49,6 +51,11 @@ func (app *ServerApp) registerRoutes() {
 	app.router.Register(protocol.MsgPing, app.handlePing)
 	app.router.Register(protocol.MsgMessBroadcast, app.chatHdl.HandleBroadcast)
 	app.router.Register(protocol.MsgMessUnicast, app.chatHdl.HandleUnicast)
+	app.router.Register(protocol.MsgFileInit, app.fileHdl.HandleFileInit)
+	app.router.Register(protocol.MsgFileResponse, app.fileHdl.HandleFileResponse)
+	app.router.Register(protocol.MsgFileChunk, app.fileHdl.HandleFileChunk)
+	app.router.Register(protocol.MsgFileComplete, app.fileHdl.HandleFileComplete)
+	app.router.Register(protocol.MsgFileCancel, app.fileHdl.HandleFileCancel)
 }
 
 func (app *ServerApp) handleAuth(sess *rudp.Session, _ uint8, payload []byte) error {
@@ -156,6 +163,27 @@ func (app *ServerApp) OnMessageReceived(sess *rudp.Session, streamID, msgType ui
 
 // OnSessionClosed removes authenticated presence after transport closure.
 func (app *ServerApp) OnSessionClosed(sess *rudp.Session, reason string) {
+	if username, ok := state.LookupUsernameByConnID(sess.ID()); ok {
+		for _, transfer := range state.CancelTransfersForUser(username) {
+			peerName := transfer.ReceiverUsername
+			streamID := transfer.ReceiverStreamID
+			if username == transfer.ReceiverUsername {
+				peerName = transfer.SenderUsername
+				streamID = transfer.SenderStreamID
+			}
+			peer, online := state.LookupTargetByUsername(peerName)
+			if !online || peer.OutboundCh == nil {
+				continue
+			}
+			payload, encodeErr := protocol.EncodeJSONPayload(protocol.FileCancelPayload{TransferID: transfer.TransferID, CancelledBy: username, Reason: protocol.FileCodePeerDisconnected, Message: "peer disconnected", Timestamp: time.Now().UnixMilli()})
+			if encodeErr != nil {
+				continue
+			}
+			if forwardErr := app.fileHdl.Forward(peer.OutboundCh, peer.ConnectionID, streamID, protocol.MsgFileCancel, payload); forwardErr != nil {
+				slog.Debug("server file cancel forwarding failed", "error", forwardErr)
+			}
+		}
+	}
 	removed, targets, existed := state.RemoveUserByConnID(sess.ID())
 	if !existed || removed == nil {
 		return
