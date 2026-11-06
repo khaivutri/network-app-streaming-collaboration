@@ -122,6 +122,44 @@ func (c *ChatClient) SendDirect(recipient, content string) (string, error) {
 	return id, err
 }
 
+// StartHeartbeat sends periodic PING messages to maintain session liveness.
+func (c *ChatClient) StartHeartbeat(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 3 * time.Second
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				_ = c.SendPing()
+			}
+		}
+	}()
+}
+
+// SendPing transmits a control ping to refresh server session idle timer.
+func (c *ChatClient) SendPing() error {
+	packet := &protocol.Packet{
+		Hdr: protocol.Header{
+			Version:      protocol.ProtocolVersion,
+			MsgType:      protocol.MsgPing,
+			StreamID:     protocol.StreamControl,
+			ConnectionID: c.connID,
+			WindowSize:   protocol.DefaultWindowSize,
+		},
+	}
+	raw, err := protocol.MarshalPacket(packet)
+	if err != nil {
+		return err
+	}
+	_, err = c.conn.WriteToUDP(raw, c.server)
+	return err
+}
+
 // Listen consumes server messages until ctx is cancelled and updates the local store.
 func (c *ChatClient) Listen(ctx context.Context) (err error) {
 	defer func() {
@@ -129,12 +167,15 @@ func (c *ChatClient) Listen(ctx context.Context) (err error) {
 			err = fmt.Errorf("chat client: recovered receiver panic: %v", recovered)
 		}
 	}()
+	_ = c.conn.SetReadDeadline(time.Time{})
 	buffer := make([]byte, protocol.HeaderSize+protocol.MaxUDPPayload)
 	for {
 		if deadline, ok := ctx.Deadline(); ok {
 			if setErr := c.conn.SetReadDeadline(deadline); setErr != nil {
 				return fmt.Errorf("chat client: set read deadline: %w", setErr)
 			}
+		} else {
+			_ = c.conn.SetReadDeadline(time.Time{})
 		}
 		n, _, readErr := c.conn.ReadFromUDP(buffer)
 		if readErr != nil {
@@ -239,23 +280,41 @@ func (c *ChatClient) handleFileInit(packet *protocol.Packet) {
 	if err != nil {
 		return
 	}
+	fmt.Printf("\n[File Incoming] Nhận yêu cầu gửi file '%s' (%d bytes) từ '%s'...\n", initPayload.FileName, initPayload.FileSize, initPayload.Sender)
 	downloader, err := transfer.NewDownloader(filepath.Join("storage", "staging"), filepath.Join("storage", "downloads"), &initPayload)
 	response := protocol.FileResponsePayload{TransferID: initPayload.TransferID, Accepted: err == nil, Code: protocol.FileCodeReady, Timestamp: time.Now().UnixMilli()}
 	if err != nil {
 		response.Code = protocol.FileCodeStorageError
 		response.Message = err.Error()
+		fmt.Printf("[File Error] Không thể tạo file tạm: %v\n", err)
 	} else {
 		c.transferMgr.RegisterDownloader(initPayload.TransferID, downloader)
 		c.store.UpdateFileProgress(&transfer.TransferProgress{TransferID: initPayload.TransferID, Direction: "DOWNLOAD", Peer: initPayload.Sender, FileName: initPayload.FileName, FileSize: initPayload.FileSize, State: "INIT"})
+		fmt.Printf("[File Accepted] Đã chấp nhận và sẵn sàng nhận các chunk...\n")
 	}
 	_ = c.send(packet.Hdr.StreamID, protocol.MsgFileResponse, response)
 }
 
 func (c *ChatClient) handleFileResponse(packet *protocol.Packet) {
 	response, err := protocol.DecodeJSONPayload[protocol.FileResponsePayload](packet.Payload)
-	if err != nil || !response.Accepted {
+	if err != nil {
 		return
 	}
+	if !response.Accepted {
+		uploader, _ := c.transferMgr.Remove(response.TransferID)
+		if uploader != nil {
+			_ = uploader.Close()
+		}
+		c.store.UpdateFileProgress(&transfer.TransferProgress{
+			TransferID: response.TransferID,
+			Direction:  "UPLOAD",
+			State:      "REJECTED",
+		})
+		c.releaseTransferStream(response.TransferID)
+		fmt.Printf("\n[File Transfer Failed] Người nhận từ chối hoặc ngoại tuyến: %s (code=%s)\n", response.Message, response.Code)
+		return
+	}
+	fmt.Printf("\n[File Transfer] Người nhận đã chấp nhận! Đang truyền các khối dữ liệu (chunks)...\n")
 	uploader, ok := c.transferMgr.Uploader(response.TransferID)
 	if !ok {
 		return
@@ -306,10 +365,12 @@ func (c *ChatClient) handleFileChunk(packet *protocol.Packet) {
 	if verifyErr != nil {
 		_ = c.send(packet.Hdr.StreamID, protocol.MsgFileCancel, protocol.FileCancelPayload{TransferID: id, Reason: protocol.FileCodeChecksumFailed, Timestamp: time.Now().UnixMilli()})
 		c.store.UpdateFileProgress(&transfer.TransferProgress{TransferID: id, State: "ERROR"})
+		fmt.Printf("\n[File Error] Mã băm SHA-256 không khớp! Đã hủy file.\n")
 		return
 	}
 	_ = c.send(packet.Hdr.StreamID, protocol.MsgFileComplete, protocol.FileCompletePayload{TransferID: id, VerifiedSHA256: checksum, TotalBytesReceived: int64(chunk.ChunkIndex+1) * int64(len(chunk.Data)), CompletedAt: time.Now().UnixMilli()})
 	c.store.UpdateFileProgress(&transfer.TransferProgress{TransferID: id, State: "COMPLETED", Percentage: 100})
+	fmt.Printf("\n[File Received Complete] Đã nhận đủ và xác thực SHA-256 thành công! File đã lưu vào thư mục: storage/downloads/\n")
 }
 
 func (c *ChatClient) handleFileComplete(packet *protocol.Packet) {
@@ -323,6 +384,7 @@ func (c *ChatClient) handleFileComplete(packet *protocol.Packet) {
 	}
 	c.store.UpdateFileProgress(&transfer.TransferProgress{TransferID: complete.TransferID, State: "COMPLETED", Percentage: 100})
 	c.releaseTransferStream(complete.TransferID)
+	fmt.Printf("\n[File Transfer Success] Người nhận đã nhận thành công 100%% và kiểm tra SHA-256 trùng khớp! (transfer_id=%s)\n", complete.TransferID)
 }
 
 func (c *ChatClient) handleFileCancel(packet *protocol.Packet) {
@@ -339,6 +401,7 @@ func (c *ChatClient) handleFileCancel(packet *protocol.Packet) {
 	}
 	c.store.UpdateFileProgress(&transfer.TransferProgress{TransferID: cancel.TransferID, State: "CANCELLED"})
 	c.releaseTransferStream(cancel.TransferID)
+	fmt.Printf("\n[File Transfer Cancelled] Quá trình truyền file bị hủy: %s\n", cancel.Reason)
 }
 
 func (c *ChatClient) transferStream(id string) uint8 {

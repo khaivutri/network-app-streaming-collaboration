@@ -16,6 +16,7 @@ import (
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/transport/rudp"
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/transport/tcp_handshake"
 	"strings"
+	"unicode"
 )
 
 func main() {
@@ -140,22 +141,30 @@ func runStep6File(serverAddr, username, password string) error {
 	if !response.Success {
 		return fmt.Errorf("login failed: %s", response.Message)
 	}
+	_ = conn.SetReadDeadline(time.Time{})
 	chat := client.NewChatClient(conn, addr, welcome.Hdr.ConnectionID, store)
 	chatCtx, cancelChat := context.WithCancel(context.Background())
 	defer cancelChat()
-	go func() { _ = chat.Listen(chatCtx) }()
+	chat.StartHeartbeat(chatCtx, 3*time.Second)
+	go func() {
+		if err := chat.Listen(chatCtx); err != nil && chatCtx.Err() == nil {
+			fmt.Printf("\n[Receiver Error] %v\n", err)
+		}
+	}()
 	fmt.Println("Connected. Commands: /sendfile <recipient> <path> [caption], /cancel <transfer_id>, /status")
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if strings.HasPrefix(line, "/sendfile ") {
-			parts := strings.Fields(strings.TrimSpace(strings.TrimPrefix(line, "/sendfile ")))
-			if len(parts) < 2 {
+		if strings.HasPrefix(line, "/sendfile") {
+			tokens := parseCommandLine(line)
+			if len(tokens) < 3 {
 				fmt.Println("usage: /sendfile <recipient> <path> [caption]")
 				continue
 			}
-			caption := strings.Join(parts[2:], " ")
-			id, sendErr := chat.SendFile(parts[0], parts[1], caption)
+			recipient := tokens[1]
+			filePath := tokens[2]
+			caption := strings.Join(tokens[3:], " ")
+			id, sendErr := chat.SendFile(recipient, filePath, caption)
 			fmt.Printf("transfer=%s err=%v\n", id, sendErr)
 			continue
 		}
@@ -236,10 +245,16 @@ func runStep5Chat(serverAddr, username, password string) error {
 	if !response.Success {
 		return fmt.Errorf("login failed: %s", response.Message)
 	}
+	_ = conn.SetReadDeadline(time.Time{})
 	chat := client.NewChatClient(conn, addr, welcome.Hdr.ConnectionID, store)
 	chatCtx, cancelChat := context.WithCancel(context.Background())
 	defer cancelChat()
-	go func() { _ = chat.Listen(chatCtx) }()
+	chat.StartHeartbeat(chatCtx, 3*time.Second)
+	go func() {
+		if err := chat.Listen(chatCtx); err != nil && chatCtx.Err() == nil {
+			fmt.Printf("\n[Receiver Error] %v\n", err)
+		}
+	}()
 	fmt.Println("Connected. Type a message, or /dm <user> <message>; Ctrl+C to exit.")
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
@@ -262,4 +277,34 @@ func runStep5Chat(serverAddr, username, password string) error {
 		}
 	}
 	return scanner.Err()
+}
+
+// parseCommandLine splits a command line string into tokens respecting single and double quotes.
+func parseCommandLine(input string) []string {
+	var args []string
+	var current strings.Builder
+	inQuotes := false
+	var quoteChar rune
+
+	for _, r := range input {
+		switch {
+		case (r == '"' || r == '\'') && !inQuotes:
+			inQuotes = true
+			quoteChar = r
+		case inQuotes && r == quoteChar:
+			inQuotes = false
+			quoteChar = 0
+		case unicode.IsSpace(r) && !inQuotes:
+			if current.Len() > 0 {
+				args = append(args, current.String())
+				current.Reset()
+			}
+		default:
+			current.WriteRune(r)
+		}
+	}
+	if current.Len() > 0 {
+		args = append(args, current.String())
+	}
+	return args
 }

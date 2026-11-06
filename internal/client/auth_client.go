@@ -108,6 +108,7 @@ func (c *AuthClient) read(ctx context.Context, expected uint8) (*protocol.Packet
 	if err := c.conn.SetReadDeadline(deadline); err != nil {
 		return nil, err
 	}
+	defer func() { _ = c.conn.SetReadDeadline(time.Time{}) }()
 	buf := make([]byte, protocol.HeaderSize+protocol.MaxUDPPayload)
 	for {
 		n, _, err := c.conn.ReadFromUDP(buf)
