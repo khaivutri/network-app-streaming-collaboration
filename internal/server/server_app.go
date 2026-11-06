@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/khaivutri/network-app-streaming-collaboration/internal/server/dispatcher"
+	"github.com/khaivutri/network-app-streaming-collaboration/internal/server/handlers"
 	"github.com/khaivutri/network-app-streaming-collaboration/internal/server/state"
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/protocol"
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/transport/rudp"
@@ -18,6 +19,7 @@ type ServerApp struct {
 	mux       *rudp.Mux
 	router    *dispatcher.Router
 	credStore *state.CredentialStore
+	chatHdl   *handlers.ChatHandler
 }
 
 // NewServerApp creates a Step 4 server bound to listenAddr.
@@ -29,6 +31,7 @@ func NewServerApp(listenAddr, usersPath string) (*ServerApp, error) {
 	app := &ServerApp{
 		router:    dispatcher.NewRouter(),
 		credStore: credStore,
+		chatHdl:   handlers.NewChatHandler(),
 	}
 	mux, err := rudp.NewMux(rudp.DefaultMuxConfig(listenAddr), app)
 	if err != nil {
@@ -44,6 +47,8 @@ func (app *ServerApp) registerRoutes() {
 	app.router.Register(protocol.MsgLogout, app.handleLogout)
 	app.router.Register(protocol.MsgDiscoPeers, app.handlePeers)
 	app.router.Register(protocol.MsgPing, app.handlePing)
+	app.router.Register(protocol.MsgMessBroadcast, app.chatHdl.HandleBroadcast)
+	app.router.Register(protocol.MsgMessUnicast, app.chatHdl.HandleUnicast)
 }
 
 func (app *ServerApp) handleAuth(sess *rudp.Session, _ uint8, payload []byte) error {
