@@ -7,7 +7,7 @@ ADDR ?= :9000
 SERVER ?= 127.0.0.1:9000
 
 .DEFAULT_GOAL := help
-.PHONY: help fmt fmt-check vet test test-proto test-tcp test-rudp test-int race cover check build server-tcp client-tcp server-udp client-udp server-step3-auth client-step3-auth server-step4-concurrency client-step4-concurrency server-step5-chat client-step5-chat test-step4 test-step5 smoke-step4 smoke-step5 smoke-tcp smoke-udp clean
+.PHONY: help fmt fmt-check vet test test-proto test-tcp test-rudp test-int race cover check build server-tcp client-tcp server-udp client-udp server-step3-auth client-step3-auth server-step4-concurrency client-step4-concurrency server-step5-chat client-step5-chat server-step6-file client-step6-file test-step4 test-step5 test-step6 smoke-step4 smoke-step5 smoke-step6 smoke-tcp smoke-udp clean clean-storage
 
 help: ## Show available commands
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
@@ -66,6 +66,16 @@ test-step5: ## Run Step 5 streaming and messaging tests with race detector
 	$(GO) test -v -race -run=TestStep5 ./tests/integration/... ./pkg/protocol/... ./pkg/transport/rudp/... ./internal/client/...
 smoke-step5: build ## Run Step 5 chat smoke test
 	@./$(BIN_DIR)/server --mode=step5-chat --addr=127.0.0.1:19005 --users=configs/users.json & SRV_PID=$$!; trap "kill $$SRV_PID 2>/dev/null || true" EXIT; sleep 0.5; $(GO) test -v -race -run=TestStep5_BroadcastChat_EndToEnd ./tests/integration/...
+server-step6-file: ## Run Step 6 reliable file transfer server
+	$(GO) run ./cmd/server --mode=step6-file --addr=$(ADDR) --users=configs/users.json
+client-step6-file: ## Run Step 6 interactive file transfer client
+	$(GO) run ./cmd/client --mode=step6-file --server=$(SERVER) --user=hung.vo --pass=Password@123
+test-step6: ## Run Step 6 protocol, transfer, and integration tests
+	$(GO) test -v -race -run=TestStep6 ./tests/integration/... ./pkg/protocol/... ./internal/client/transfer/... ./internal/server/handlers/...
+smoke-step6: build ## Run Step 6 file transfer smoke test
+	@./$(BIN_DIR)/server --mode=step6-file --addr=127.0.0.1:19006 --users=configs/users.json & SRV_PID=$$!; trap "kill $$SRV_PID 2>/dev/null || true" EXIT; sleep 0.5; $(GO) test -v -race -run=TestStep6_FileTransfer_EndToEnd_Integrity_BR08 ./tests/integration/...
+clean-storage: ## Remove partial and completed local transfer files
+	rm -rf storage/staging/* storage/downloads/*
 smoke-tcp: build ## Run TCP smoke test
 	@./$(BIN_DIR)/server --mode=step2-tcp --addr=127.0.0.1:19000 & SRV_PID=$$!; trap "kill $$SRV_PID 2>/dev/null || true" EXIT; sleep 0.5; ./$(BIN_DIR)/client --mode=step2-tcp --server=127.0.0.1:19000
 smoke-udp: build ## Run UDP smoke test
