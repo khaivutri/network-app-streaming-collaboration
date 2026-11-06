@@ -74,6 +74,9 @@ func main() {
 	} else if *mode == "step5-chat" {
 		returnWithError(runStep5Chat(*server, *user, *pass))
 		return
+	} else if *mode == "step6-file" {
+		returnWithError(runStep6File(*server, *user, *pass))
+		return
 	} else {
 		err = fmt.Errorf("unsupported mode %q", *mode)
 	}
@@ -85,6 +88,95 @@ func main() {
 		return
 	}
 	fmt.Printf("Mode: %s\nLocalAddr -> ServerAddr: %s -> %s\nAssigned ConnectionID: 0x%08X (%d)\nServer Acknowledgment Message: %s\nRound-Trip Time (RTT): %d ms / %d µs\nFinal State: CONNECTED -> Gracefully Closed (FIN/FIN-ACK)\n", *mode, r.LocalAddr, r.ServerAddr, r.ConnectionID, r.ConnectionID, r.WelcomeMsg, r.RTTMillis, r.RTTMicros)
+}
+
+func runStep6File(serverAddr, username, password string) error {
+	addr, err := net.ResolveUDPAddr("udp", serverAddr)
+	if err != nil {
+		return fmt.Errorf("file client resolve server: %w", err)
+	}
+	conn, err := net.ListenUDP("udp", nil)
+	if err != nil {
+		return fmt.Errorf("file client bind socket: %w", err)
+	}
+	defer conn.Close()
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return err
+	}
+	syn, err := protocol.MarshalPacket(&protocol.Packet{Hdr: protocol.Header{Version: protocol.ProtocolVersion, Flags: protocol.FlagSYN, MsgType: protocol.MsgCtrlHandshake, StreamID: protocol.StreamControl}})
+	if err != nil {
+		return err
+	}
+	if _, err = conn.WriteToUDP(syn, addr); err != nil {
+		return fmt.Errorf("file client send SYN: %w", err)
+	}
+	buffer := make([]byte, protocol.HeaderSize+protocol.MaxUDPPayload)
+	n, _, err := conn.ReadFromUDP(buffer)
+	if err != nil {
+		return fmt.Errorf("file client receive SYN-ACK: %w", err)
+	}
+	welcome, err := protocol.UnmarshalPacket(buffer[:n])
+	if err != nil {
+		return err
+	}
+	ack, err := protocol.MarshalPacket(&protocol.Packet{Hdr: protocol.Header{Version: protocol.ProtocolVersion, Flags: protocol.FlagACK, MsgType: protocol.MsgCtrlHandshake, StreamID: protocol.StreamControl, ConnectionID: welcome.Hdr.ConnectionID, AckNum: 1}})
+	if err != nil {
+		return err
+	}
+	if _, err = conn.WriteToUDP(ack, addr); err != nil {
+		return err
+	}
+	if err = conn.SetReadDeadline(time.Time{}); err != nil {
+		return err
+	}
+	store := state.NewClientStore()
+	auth := client.NewAuthClient(conn, addr, welcome.Hdr.ConnectionID, store)
+	loginCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	response, err := auth.Login(loginCtx, username, password)
+	if err != nil {
+		return err
+	}
+	if !response.Success {
+		return fmt.Errorf("login failed: %s", response.Message)
+	}
+	chat := client.NewChatClient(conn, addr, welcome.Hdr.ConnectionID, store)
+	chatCtx, cancelChat := context.WithCancel(context.Background())
+	defer cancelChat()
+	go func() { _ = chat.Listen(chatCtx) }()
+	fmt.Println("Connected. Commands: /sendfile <recipient> <path> [caption], /cancel <transfer_id>, /status")
+	scanner := bufio.NewScanner(os.Stdin)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "/sendfile ") {
+			parts := strings.Fields(strings.TrimSpace(strings.TrimPrefix(line, "/sendfile ")))
+			if len(parts) < 2 {
+				fmt.Println("usage: /sendfile <recipient> <path> [caption]")
+				continue
+			}
+			caption := strings.Join(parts[2:], " ")
+			id, sendErr := chat.SendFile(parts[0], parts[1], caption)
+			fmt.Printf("transfer=%s err=%v\n", id, sendErr)
+			continue
+		}
+		if strings.HasPrefix(line, "/cancel ") {
+			if cancelErr := chat.CancelTransfer(strings.TrimSpace(strings.TrimPrefix(line, "/cancel "))); cancelErr != nil {
+				fmt.Println("cancel error:", cancelErr)
+			}
+			continue
+		}
+		if line == "/status" {
+			fmt.Println("Use transfer ID from /sendfile; progress is maintained in the client store.")
+			continue
+		}
+		if line != "" {
+			_, err = chat.SendBroadcast(line)
+			if err != nil {
+				fmt.Println("send error:", err)
+			}
+		}
+	}
+	return scanner.Err()
 }
 
 func returnWithError(err error) {
