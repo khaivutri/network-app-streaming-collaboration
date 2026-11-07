@@ -23,6 +23,21 @@ type ActiveTransfer struct {
 	ChunkSize        int
 	SHA256           string
 	StartedAt        time.Time
+	ReceiverNextSeq  uint32
+}
+
+// NextReceiverSeq reserves the next reliable sequence number for relayed data.
+// The transfer registry lock serializes reservations across concurrent server
+// packet handlers, preserving receiver stream order without buffering chunks.
+func (transfer *ActiveTransfer) NextReceiverSeq() uint32 {
+	GlobalTransfersMu.Lock()
+	defer GlobalTransfersMu.Unlock()
+	if transfer.ReceiverNextSeq == 0 {
+		transfer.ReceiverNextSeq = 1
+	}
+	sequence := transfer.ReceiverNextSeq
+	transfer.ReceiverNextSeq++
+	return sequence
 }
 
 var (

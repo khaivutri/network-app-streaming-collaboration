@@ -40,7 +40,7 @@ func DefaultMuxConfig(listenAddr string) MuxConfig {
 		SocketReadBuffer:   4 * 1024 * 1024,
 		SocketWriteBuffer:  4 * 1024 * 1024,
 		MaxConnections:     128,
-		SessionQueueSize:   256,
+		SessionQueueSize:   2048,
 		HandshakeTimeout:   3 * time.Second,
 		ReaperInterval:     time.Second,
 		SessionIdleTimeout: 15 * time.Second,

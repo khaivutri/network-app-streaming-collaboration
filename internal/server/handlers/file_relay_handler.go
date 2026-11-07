@@ -35,21 +35,21 @@ func (h *FileRelayHandler) HandleFileInit(sess *rudp.Session, streamID uint8, pa
 		return fmt.Errorf("file relay: parse transfer id: %w", err)
 	}
 	state.RegisterActiveTransfer(&state.ActiveTransfer{
-														TransferID: request.TransferID, 
-														TransferIDBytes: idBytes,
-														SenderUsername: sender, 
-														ReceiverUsername: request.Recipient, 
-														SenderConnID: sess.ID(), 
-														ReceiverConnID: receiver.ConnectionID, 
-														SenderStreamID: streamID, 
-														ReceiverStreamID: streamID, 
-														FileName: request.FileName, 
-														FileSize: request.FileSize, 
-														TotalChunks: request.TotalChunks, 
-														ChunkSize: request.ChunkSize, 
-														SHA256: request.SHA256, 
-														StartedAt: time.Now(),
-													})
+		TransferID:       request.TransferID,
+		TransferIDBytes:  idBytes,
+		SenderUsername:   sender,
+		ReceiverUsername: request.Recipient,
+		SenderConnID:     sess.ID(),
+		ReceiverConnID:   receiver.ConnectionID,
+		SenderStreamID:   streamID,
+		ReceiverStreamID: streamID,
+		FileName:         request.FileName,
+		FileSize:         request.FileSize,
+		TotalChunks:      request.TotalChunks,
+		ChunkSize:        request.ChunkSize,
+		SHA256:           request.SHA256,
+		StartedAt:        time.Now(),
+	})
 	request.Sender = sender
 	encoded, err := protocol.EncodeJSONPayload(request)
 	if err != nil {
@@ -94,24 +94,27 @@ func (h *FileRelayHandler) HandleFileChunk(_ *rudp.Session, _ uint8, payload []b
 	if !ok || receiver.OutboundCh == nil {
 		return nil
 	}
+	seq := transfer.NextReceiverSeq()
 	raw, err := protocol.MarshalPacket(&protocol.Packet{
-														Hdr: protocol.Header{
-															Version: protocol.ProtocolVersion, 
-															Flags: protocol.FlagREL | protocol.FlagORD | protocol.FlagFRAG, 
-															MsgType: protocol.MsgFileChunk, 
-															StreamID: transfer.ReceiverStreamID, 
-															ConnectionID: receiver.ConnectionID, 
-															WindowSize: protocol.DefaultWindowSize,
-															}, 
-															Payload: payload,
-														})
+		Hdr: protocol.Header{
+			Version:      protocol.ProtocolVersion,
+			Flags:        protocol.FlagREL | protocol.FlagORD | protocol.FlagACK,
+			MsgType:      protocol.MsgFileChunk,
+			StreamID:     transfer.ReceiverStreamID,
+			ConnectionID: receiver.ConnectionID,
+			SeqNum:       seq,
+			WindowSize:   protocol.DefaultWindowSize,
+		},
+		Payload: payload,
+	})
 	if err != nil {
 		return fmt.Errorf("file relay: marshal chunk: %w", err)
 	}
 	select {
 	case receiver.OutboundCh <- raw:
-	default:
-		slog.Warn("file relay: receiver queue full", "transfer_id", transfer.TransferID)
+		return nil
+	case <-time.After(20 * time.Millisecond):
+		slog.Warn("file relay: receiver queue congested, dropped chunk", "transfer_id", transfer.TransferID)
 	}
 	return nil
 }
