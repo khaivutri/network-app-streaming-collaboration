@@ -24,13 +24,22 @@ const (
 	// ErrCodeMsgSelfRecipient identifies an attempted direct message to oneself.
 	ErrCodeMsgSelfRecipient = "MSG_SELF_RECIPIENT"
 	// ErrCodeMsgRecipientOffline identifies an unavailable direct-message target.
-	ErrCodeMsgRecipientOffline = "MSG_RECIPIENT_OFFLINE"
+	ErrCodeMsgRecipientOffline     = "MSG_RECIPIENT_OFFLINE"
+	ErrCodeUnauthorized            = "ERR_UNAUTHORIZED"
+	ErrCodeFileInvalidSource       = "FILE_INVALID_SOURCE"
+	ErrCodeFileTooLarge            = "FILE_TOO_LARGE"
+	ErrCodeFileTransferInterrupted = "FILE_TRANSFER_INTERRUPTED"
+	ErrCodeFileChecksumMismatch    = "FILE_CHECKSUM_MISMATCH"
+	ErrCodeRateLimited             = "ERR_RATE_LIMITED"
+	ErrCodeInternalServer          = "ERR_INTERNAL_SERVER"
 )
 
 // ErrorMessagePayload is the standard JSON error response for an application message.
 type ErrorMessagePayload struct {
-	Code       string `json:"code"`
-	Message    string `json:"message"`
-	RefID      string `json:"ref_id,omitempty"`
-	ServerTime int64  `json:"server_time"`
+	Code        string `json:"code"`
+	Message     string `json:"message"`
+	RefID       string `json:"ref_id,omitempty"`
+	RefMsgType  uint8  `json:"ref_msg_type,omitempty"`
+	Recoverable bool   `json:"recoverable"`
+	ServerTime  int64  `json:"server_time"`
 }
