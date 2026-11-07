@@ -38,11 +38,36 @@ func TestStream_OutOfOrderAndSACKBitmapCalculation(t *testing.T) {
 func TestStream_ProcessAckAndFastRetransmit(t *testing.T) {
 	stream := NewStream(protocol.StreamBroadcastChat, 8)
 	for seq := uint32(1); seq <= 4; seq++ {
-		packet := &protocol.Packet{Hdr: protocol.Header{SeqNum: seq}}
+		packet := &protocol.Packet{
+			Hdr: protocol.Header{
+				SeqNum: seq,
+			},
+		}
 		stream.RecordSent(packet, []byte{byte(seq)})
 	}
 	acked, lost := stream.ProcessAck(1, 0b111, 8)
 	if acked != 3 || len(lost) != 1 || lost[0].SeqNum != 1 {
 		t.Fatalf("acked=%d lost=%v", acked, lost)
+	}
+	// Immediate duplicate SACK within cooldown should not spam another retransmit.
+	_, duplicateLost := stream.ProcessAck(1, 0b111, 8)
+	if len(duplicateLost) != 0 {
+		t.Fatalf("expected cooldown to suppress duplicate fast retransmit, got %d", len(duplicateLost))
+	}
+}
+
+func TestStream_GetExpiredSegmentsSortedAndResetsTimer(t *testing.T) {
+	stream := NewStream(protocol.StreamFileMin, 8)
+	for _, seq := range []uint32{3, 1, 2} {
+		packet := &protocol.Packet{
+			Hdr: protocol.Header{
+				SeqNum: seq,
+			},
+		}
+		stream.RecordSent(packet, []byte{byte(seq)})
+	}
+	expired := stream.GetExpiredSegments(-1)
+	if len(expired) != 3 || expired[0].SeqNum != 1 || expired[1].SeqNum != 2 || expired[2].SeqNum != 3 {
+		t.Fatalf("expected sorted expired segments [1,2,3], got %+v", expired)
 	}
 }

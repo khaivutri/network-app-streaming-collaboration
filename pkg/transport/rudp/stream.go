@@ -1,11 +1,14 @@
 package rudp
 
 import (
+	"sort"
 	"sync"
 	"time"
 
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/protocol"
 )
+
+const fastRetransmitCooldown = 25 * time.Millisecond
 
 // SentSegment is a reliable packet retained until cumulative or selective ACK.
 type SentSegment struct {
@@ -159,22 +162,33 @@ func (s *Stream) ProcessAck(ackNum uint32, ackBitmap uint16, peerWin uint16) (in
 		return acked, nil
 	}
 	if segment, ok := s.sendBuffer[ackNum]; ok && !segment.Acked {
-		return acked, []*SentSegment{segment}
+		now := time.Now()
+		if segment.Retries == 0 || now.Sub(segment.SentTime) >= fastRetransmitCooldown {
+			segment.Retries++
+			segment.SentTime = now
+			return acked, []*SentSegment{segment}
+		}
 	}
 	return acked, nil
 }
 
-// GetExpiredSegments returns unacknowledged segments older than rto.
+// GetExpiredSegments returns unacknowledged segments older than rto sorted by
+// ascending sequence number, resetting each returned segment's retransmit timer.
 func (s *Stream) GetExpiredSegments(rto time.Duration) []*SentSegment {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	now := time.Now()
 	out := make([]*SentSegment, 0)
 	for _, segment := range s.sendBuffer {
 		if !segment.Acked && now.Sub(segment.SentTime) > rto {
+			segment.Retries++
+			segment.SentTime = now
 			out = append(out, segment)
 		}
 	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].SeqNum < out[j].SeqNum
+	})
 	return out
 }
 
