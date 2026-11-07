@@ -35,6 +35,9 @@ func NewServerApp(listenAddr, usersPath string) (*ServerApp, error) {
 		chatHdl:   handlers.NewChatHandler(),
 		fileHdl:   handlers.NewFileRelayHandler(),
 	}
+	app.router.SetPanicHandler(func(sess *rudp.Session, msgType uint8, panicErr error) {
+		_ = app.sendJSON(sess, protocol.MsgError, protocol.ErrorMessagePayload{Code: protocol.ErrCodeInternalServer, Message: "Hệ thống bận, vui lòng thử lại", RefMsgType: msgType, Recoverable: true, ServerTime: time.Now().UnixMilli()})
+	})
 	mux, err := rudp.NewMux(rudp.DefaultMuxConfig(listenAddr), app)
 	if err != nil {
 		return nil, fmt.Errorf("server: create mux: %w", err)
@@ -146,9 +149,13 @@ func (app *ServerApp) handlePeers(sess *rudp.Session, _ uint8, payload []byte) e
 	return app.sendJSON(sess, protocol.MsgDiscoPeersResponse, protocol.DiscoPeersResponsePayload{RequestID: req.RequestID, OnlineCount: len(peers), Peers: peers, ServerTime: time.Now().UnixMilli()})
 }
 
-func (app *ServerApp) handlePing(sess *rudp.Session, _ uint8, _ []byte) error {
+func (app *ServerApp) handlePing(sess *rudp.Session, _ uint8, payload []byte) error {
+	ping, err := protocol.DecodeJSONPayload[protocol.PingPayload](payload)
+	if err != nil {
+		return fmt.Errorf("server ping decode: %w", err)
+	}
 	state.TouchHeartbeat(sess.ID(), sess.RemoteAddr())
-	return app.sendJSON(sess, protocol.MsgPong, struct{}{})
+	return app.sendJSON(sess, protocol.MsgPong, protocol.PongPayload{Seq: ping.Seq, ClientTime: ping.ClientTime, ServerTime: time.Now().UnixMilli()})
 }
 
 // OnSessionConnected records a transport-level session event.
@@ -170,6 +177,9 @@ func (app *ServerApp) OnAckReceived(sess *rudp.Session, packet *protocol.Packet)
 
 // OnSessionClosed removes authenticated presence after transport closure.
 func (app *ServerApp) OnSessionClosed(sess *rudp.Session, reason string) {
+	if reason == "IDLE_TIMEOUT" {
+		reason = "TIMEOUT"
+	}
 	if username, ok := state.LookupUsernameByConnID(sess.ID()); ok {
 		for _, transfer := range state.CancelTransfersForUser(username) {
 			peerName := transfer.ReceiverUsername
@@ -216,10 +226,14 @@ func (app *ServerApp) sendJSON(sess *rudp.Session, msgType uint8, value any) err
 	if err != nil {
 		return fmt.Errorf("server encode response: %w", err)
 	}
+	flags := uint8(protocol.FlagREL | protocol.FlagORD)
+	if msgType == protocol.MsgPong {
+		flags = protocol.FlagACK
+	}
 	raw, err := protocol.MarshalPacket(&protocol.Packet{
 		Hdr: protocol.Header{
 			Version:      protocol.ProtocolVersion,
-			Flags:        protocol.FlagREL | protocol.FlagORD,
+			Flags:        flags,
 			MsgType:      msgType,
 			StreamID:     protocol.StreamControl,
 			ConnectionID: sess.ID(),
