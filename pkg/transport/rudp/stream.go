@@ -69,6 +69,23 @@ func (s *Stream) RecordSent(pkt *protocol.Packet, raw []byte) {
 	}
 }
 
+// InFlightCount returns the number of reliable segments awaiting ACKs.
+func (s *Stream) InFlightCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.sendBuffer)
+}
+
+// PeerWindowSize returns the latest receive-window advertisement from the peer.
+func (s *Stream) PeerWindowSize() uint16 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.peerWindowSize == 0 {
+		return protocol.DefaultWindowSize
+	}
+	return s.peerWindowSize
+}
+
 // ComputeAckState returns cumulative ACK, 16-bit SACK bitmap, and receive window.
 func (s *Stream) ComputeAckState() (uint32, uint16, uint16) {
 	s.mu.RLock()

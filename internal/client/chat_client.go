@@ -231,7 +231,13 @@ func (c *ChatClient) sendPayload(streamID, msgType uint8, payload []byte) error 
 
 func (c *ChatClient) handlePacket(packet *protocol.Packet) {
 	if packet.Hdr.HasFlag(protocol.FlagACK) {
-		c.getStream(packet.Hdr.StreamID).ProcessAck(packet.Hdr.AckNum, packet.Hdr.AckBitmap, packet.Hdr.WindowSize)
+		stream := c.getStream(packet.Hdr.StreamID)
+		_, fastRetransmit := stream.ProcessAck(packet.Hdr.AckNum, packet.Hdr.AckBitmap, packet.Hdr.WindowSize)
+		for _, segment := range fastRetransmit {
+			if _, err := c.conn.WriteToUDP(segment.Raw, c.server); err != nil {
+				fmt.Printf("\n[Transfer Warning] Fast retransmit failed: %v\n", err)
+			}
+		}
 	}
 	if packet.Hdr.MsgType == protocol.MsgAck {
 		return
@@ -320,12 +326,34 @@ func (c *ChatClient) handleFileResponse(packet *protocol.Packet) {
 		return
 	}
 	go func() {
+		ticker := time.NewTicker(50 * time.Millisecond)
+		defer ticker.Stop()
+		done := make(chan struct{})
+		defer close(done)
+		go func() {
+			for {
+				select {
+				case <-ticker.C:
+					for _, segment := range c.getStream(packet.Hdr.StreamID).GetExpiredSegments(150 * time.Millisecond) {
+						if _, writeErr := c.conn.WriteToUDP(segment.Raw, c.server); writeErr != nil {
+							return
+						}
+					}
+				case <-done:
+					return
+				}
+			}
+		}()
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				c.store.UpdateFileProgress(&transfer.TransferProgress{TransferID: response.TransferID, State: "ERROR"})
 			}
 		}()
 		for index := uint32(0); ; index++ {
+			stream := c.getStream(packet.Hdr.StreamID)
+			for stream.InFlightCount() >= int(stream.PeerWindowSize()) {
+				time.Sleep(2 * time.Millisecond)
+			}
 			data, readErr := uploader.ReadChunk(index)
 			if readErr != nil || len(data) == 0 {
 				break
