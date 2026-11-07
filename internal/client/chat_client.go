@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/khaivutri/network-app-streaming-collaboration/internal/client/state"
@@ -17,16 +18,20 @@ import (
 
 // ChatClient sends and receives Step 5 messages on one authenticated UDP socket.
 type ChatClient struct {
-	conn            *net.UDPConn
-	server          *net.UDPAddr
-	connID          uint32
-	store           *state.ClientStore
-	mu              sync.Mutex
-	streams         map[uint8]*rudp.Stream
-	streamPool      *rudp.StreamPool
-	transferMgr     *transfer.Manager
-	transferStreams map[string]uint8
-	progressBars    map[string]*transfer.ProgressBar
+	conn             *net.UDPConn
+	server           *net.UDPAddr
+	connID           uint32
+	store            *state.ClientStore
+	mu               sync.Mutex
+	streams          map[uint8]*rudp.Stream
+	streamPool       *rudp.StreamPool
+	transferMgr      *transfer.Manager
+	transferStreams  map[string]uint8
+	progressBars     map[string]*transfer.ProgressBar
+	pingSeq          atomic.Uint32
+	lastServerActive time.Time
+	rto              *rudp.AdaptiveRTO
+	lastError        string
 }
 
 const clientSocketBufferSize = 4 * 1024 * 1024
@@ -38,15 +43,17 @@ func NewChatClient(conn *net.UDPConn, server *net.UDPAddr, connectionID uint32, 
 		_ = conn.SetWriteBuffer(clientSocketBufferSize)
 	}
 	return &ChatClient{
-		conn:            conn,
-		server:          server,
-		connID:          connectionID,
-		store:           store,
-		streams:         make(map[uint8]*rudp.Stream),
-		streamPool:      rudp.NewStreamPool(),
-		transferMgr:     transfer.NewManager(filepath.Join("storage", "staging"), filepath.Join("storage", "downloads")),
-		transferStreams: make(map[string]uint8),
-		progressBars:    make(map[string]*transfer.ProgressBar),
+		conn:             conn,
+		server:           server,
+		connID:           connectionID,
+		store:            store,
+		streams:          make(map[uint8]*rudp.Stream),
+		streamPool:       rudp.NewStreamPool(),
+		transferMgr:      transfer.NewManager(filepath.Join("storage", "staging"), filepath.Join("storage", "downloads")),
+		transferStreams:  make(map[string]uint8),
+		progressBars:     make(map[string]*transfer.ProgressBar),
+		rto:              rudp.NewAdaptiveRTO(rudp.DefaultRTOConfig()),
+		lastServerActive: time.Now(),
 	}
 }
 
@@ -167,6 +174,11 @@ func (c *ChatClient) StartHeartbeat(ctx context.Context, interval time.Duration)
 
 // SendPing transmits a control ping to refresh server session idle timer.
 func (c *ChatClient) SendPing() error {
+	seq := c.pingSeq.Add(1)
+	payload, err := protocol.EncodeJSONPayload(protocol.PingPayload{Seq: seq, ClientTime: time.Now().UnixMilli()})
+	if err != nil {
+		return fmt.Errorf("chat client: encode ping: %w", err)
+	}
 	packet := &protocol.Packet{
 		Hdr: protocol.Header{
 			Version:      protocol.ProtocolVersion,
@@ -175,6 +187,7 @@ func (c *ChatClient) SendPing() error {
 			ConnectionID: c.connID,
 			WindowSize:   protocol.DefaultWindowSize,
 		},
+		Payload: payload,
 	}
 	raw, err := protocol.MarshalPacket(packet)
 	if err != nil {
@@ -311,8 +324,36 @@ func (c *ChatClient) applyMessage(packet *protocol.Packet) {
 		c.handleFileComplete(packet)
 	case protocol.MsgFileCancel:
 		c.handleFileCancel(packet)
+	case protocol.MsgPong:
+		pong, err := protocol.DecodeJSONPayload[protocol.PongPayload](packet.Payload)
+		if err == nil {
+			rtt := time.Duration(time.Now().UnixMilli()-pong.ClientTime) * time.Millisecond
+			if rtt > 0 {
+				c.rto.Update(rtt)
+			}
+			c.mu.Lock()
+			c.lastServerActive = time.Now()
+			c.mu.Unlock()
+		}
+	case protocol.MsgError:
+		if message, err := protocol.DecodeJSONPayload[protocol.ErrorMessagePayload](packet.Payload); err == nil {
+			c.mu.Lock()
+			c.lastError = message.Code + ": " + message.Message
+			c.mu.Unlock()
+			fmt.Printf("\n[Lỗi Hệ Thống] Mã: %s - %s\n", message.Code, message.Message)
+		}
 	}
 }
+
+// LastServerActive returns the last accepted PONG timestamp.
+func (c *ChatClient) LastServerActive() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lastServerActive
+}
+
+// RTO returns the client's adaptive estimator.
+func (c *ChatClient) RTO() *rudp.AdaptiveRTO { return c.rto }
 
 func (c *ChatClient) handleFileInit(packet *protocol.Packet) {
 	initPayload, err := protocol.DecodeJSONPayload[protocol.FileInitPayload](packet.Payload)
@@ -386,7 +427,7 @@ func (c *ChatClient) handleFileResponse(packet *protocol.Packet) {
 			for {
 				select {
 				case <-ticker.C:
-					for _, segment := range stream.GetExpiredSegments(150 * time.Millisecond) {
+					for _, segment := range stream.GetExpiredSegments(c.rto.RTO()) {
 						if _, writeErr := c.conn.WriteToUDP(segment.Raw, c.server); writeErr != nil {
 							return
 						}
