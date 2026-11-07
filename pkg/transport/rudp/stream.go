@@ -213,6 +213,21 @@ func (s *Stream) GetExpiredSegments(rto time.Duration) []*SentSegment {
 	return out
 }
 
+// HasDeadSegments reports whether any unacknowledged segment exceeded the retry guard.
+func (s *Stream) HasDeadSegments(maxRetries int) bool {
+	if maxRetries <= 0 {
+		maxRetries = MaxSegmentRetries
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, segment := range s.sendBuffer {
+		if !segment.Acked && segment.Retries > maxRetries {
+			return true
+		}
+	}
+	return false
+}
+
 func bits16(value uint16) int {
 	count := 0
 	for value != 0 {
