@@ -25,6 +25,7 @@ type Stream struct {
 	ID              uint8
 	mu              sync.RWMutex
 	nextSendSeq     uint32
+	highestSentSeq  uint32
 	expectedRecvSeq uint32
 	reorderBuf      map[uint32]*protocol.Packet
 	sendBuffer      map[uint32]*SentSegment
@@ -64,6 +65,9 @@ func (s *Stream) RecordSent(pkt *protocol.Packet, raw []byte) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if pkt.Hdr.SeqNum > s.highestSentSeq {
+		s.highestSentSeq = pkt.Hdr.SeqNum
+	}
 	s.sendBuffer[pkt.Hdr.SeqNum] = &SentSegment{
 		SeqNum:   pkt.Hdr.SeqNum,
 		Packet:   pkt,
@@ -72,10 +76,27 @@ func (s *Stream) RecordSent(pkt *protocol.Packet, raw []byte) {
 	}
 }
 
-// InFlightCount returns the number of reliable segments awaiting ACKs.
+// InFlightCount returns the active unacknowledged sequence span awaiting ACKs.
+// Using the span from the oldest unacknowledged packet prevents sending beyond
+// the receiver's reorder window when selective ACKs create holes in sendBuffer.
 func (s *Stream) InFlightCount() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if len(s.sendBuffer) == 0 {
+		return 0
+	}
+	var minSeq uint32
+	for seq := range s.sendBuffer {
+		if minSeq == 0 || seq < minSeq {
+			minSeq = seq
+		}
+	}
+	if s.highestSentSeq >= minSeq {
+		span := int(s.highestSentSeq - minSeq + 1)
+		if span > len(s.sendBuffer) {
+			return span
+		}
+	}
 	return len(s.sendBuffer)
 }
 

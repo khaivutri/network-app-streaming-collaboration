@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/protocol"
 )
@@ -115,8 +116,11 @@ func (d *Downloader) FinalizeAndVerify() (string, error) {
 		if copyErr := copyVerifiedFile(d.stagingPath, d.downloadPath); copyErr != nil {
 			return actual, fmt.Errorf("transfer: finalize rename: %w; copy fallback: %v", err, copyErr)
 		}
-		if removeErr := os.Remove(d.stagingPath); removeErr != nil {
-			return actual, fmt.Errorf("transfer: remove staging after copy: %w", removeErr)
+		for attempt := 0; attempt < 5; attempt++ {
+			if removeErr := os.Remove(d.stagingPath); removeErr == nil || errors.Is(removeErr, os.ErrNotExist) {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
 		}
 	}
 	return actual, nil

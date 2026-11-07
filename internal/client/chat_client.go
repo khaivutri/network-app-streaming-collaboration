@@ -508,7 +508,7 @@ func (c *ChatClient) handleFileChunk(packet *protocol.Packet) {
 			TransferredBytes: downloader.BytesWritten(),
 			Percentage:       downloader.Progress(),
 		})
-		fmt.Printf("\n[File Error] Mã băm SHA-256 không khớp! Đã hủy file.\n")
+		fmt.Printf("\n[File Error] Mã băm SHA-256 không khớp! Đã hủy file (%v).\n", verifyErr)
 		return
 	}
 	bytesReceived := downloader.BytesWritten()

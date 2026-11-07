@@ -149,11 +149,15 @@ func TestStep6_RealNetwork_LargeFileRelay_10MB(t *testing.T) {
 	deadline := time.Now().Add(30 * time.Second)
 	completed := false
 	for time.Now().Before(deadline) {
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 		hungProg, _ := hungStore.GetFileProgress(transferID)
 		bobProg, _ := bobStore.GetFileProgress(transferID)
 		if hungProg != nil && hungProg.State == "COMPLETED" && bobProg != nil && bobProg.State == "COMPLETED" {
 			completed = true
+			break
+		}
+		if (hungProg != nil && (hungProg.State == "ERROR" || hungProg.State == "CANCELLED")) ||
+			(bobProg != nil && (bobProg.State == "ERROR" || bobProg.State == "CANCELLED")) {
 			break
 		}
 	}
