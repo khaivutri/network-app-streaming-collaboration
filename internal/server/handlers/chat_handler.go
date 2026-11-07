@@ -27,7 +27,7 @@ func (h *ChatHandler) HandleBroadcast(sess *rudp.Session, _ uint8, payload []byt
 	}
 	content := strings.TrimSpace(request.Content)
 	if content == "" {
-		return h.sendError(sess, protocol.ErrCodeMsgEmptyContent, "Nội dung tin nhắn không được để trống", request.ClientMsgID)
+		return h.sendError(sess, protocol.ErrCodeMsgEmptyContent, "Nội dung tin nhắn không được để trống", request.ClientMsgID, protocol.MsgMessBroadcast, true)
 	}
 	sender, ok := state.LookupUsernameByConnID(sess.ID())
 	if !ok {
@@ -82,18 +82,18 @@ func (h *ChatHandler) HandleUnicast(sess *rudp.Session, _ uint8, payload []byte)
 	}
 	content := strings.TrimSpace(request.Content)
 	if content == "" {
-		return h.sendError(sess, protocol.ErrCodeMsgEmptyContent, "Nội dung tin nhắn không được để trống", request.ClientMsgID)
+		return h.sendError(sess, protocol.ErrCodeMsgEmptyContent, "Nội dung tin nhắn không được để trống", request.ClientMsgID, protocol.MsgMessUnicast, true)
 	}
 	sender, ok := state.LookupUsernameByConnID(sess.ID())
 	if !ok {
 		return fmt.Errorf("chat: unauthenticated sender connection %d", sess.ID())
 	}
 	if request.Recipient == sender {
-		return h.sendError(sess, protocol.ErrCodeMsgSelfRecipient, "Không thể gửi tin nhắn riêng cho chính mình", request.ClientMsgID)
+		return h.sendError(sess, protocol.ErrCodeMsgSelfRecipient, "Không thể gửi tin nhắn riêng cho chính mình", request.ClientMsgID, protocol.MsgMessUnicast, true)
 	}
 	recipient, online := state.LookupTargetByUsername(request.Recipient)
 	if !online || recipient.OutboundCh == nil {
-		return h.sendError(sess, protocol.ErrCodeMsgRecipientOffline, "Người nhận hiện không trực tuyến", request.ClientMsgID)
+		return h.sendError(sess, protocol.ErrCodeMsgRecipientOffline, "Người nhận hiện không trực tuyến", request.ClientMsgID, protocol.MsgMessUnicast, true)
 	}
 	senderInfo, _ := state.LookupTargetByUsername(sender)
 	now := time.Now().UnixMilli()
@@ -131,12 +131,14 @@ func (h *ChatHandler) HandleUnicast(sess *rudp.Session, _ uint8, payload []byte)
 	return h.sendReliableJSON(sess, protocol.StreamDirectChat, protocol.MsgMessDelivered, receipt)
 }
 
-func (h *ChatHandler) sendError(sess *rudp.Session, code, message, refID string) error {
+func (h *ChatHandler) sendError(sess *rudp.Session, code, message, refID string, refMsgType uint8, recoverable bool) error {
 	return h.sendReliableJSON(sess, protocol.StreamControl, protocol.MsgError, protocol.ErrorMessagePayload{
-		Code:       code,
-		Message:    message,
-		RefID:      refID,
-		ServerTime: time.Now().UnixMilli(),
+		Code:        code,
+		Message:     message,
+		RefID:       refID,
+		RefMsgType:  refMsgType,
+		Recoverable: recoverable,
+		ServerTime:  time.Now().UnixMilli(),
 	})
 }
 
