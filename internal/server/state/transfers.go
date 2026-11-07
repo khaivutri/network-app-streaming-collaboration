@@ -26,18 +26,34 @@ type ActiveTransfer struct {
 	ReceiverNextSeq  uint32
 }
 
-// NextReceiverSeq reserves the next reliable sequence number for relayed data.
-// The transfer registry lock serializes reservations across concurrent server
-// packet handlers, preserving receiver stream order without buffering chunks.
-func (transfer *ActiveTransfer) NextReceiverSeq() uint32 {
+// ReserveReceiverSeq reserves the next reliable sequence number for relayed data.
+// The registry lock serializes reservations across concurrent packet handlers,
+// preserving receiver stream order while updating the canonical transfer entry.
+func ReserveReceiverSeq(transferID string) (uint32, bool) {
 	GlobalTransfersMu.Lock()
 	defer GlobalTransfersMu.Unlock()
+	transfer, ok := GlobalActiveTransfers[transferID]
+	if !ok || transfer == nil {
+		return 0, false
+	}
 	if transfer.ReceiverNextSeq == 0 {
 		transfer.ReceiverNextSeq = 1
 	}
 	sequence := transfer.ReceiverNextSeq
 	transfer.ReceiverNextSeq++
-	return sequence
+	return sequence, true
+}
+
+// LookupActiveTransferByReceiverConnID finds the transfer routed to a receiver.
+func LookupActiveTransferByReceiverConnID(connectionID uint32) (ActiveTransfer, bool) {
+	GlobalTransfersMu.RLock()
+	defer GlobalTransfersMu.RUnlock()
+	for _, transfer := range GlobalActiveTransfers {
+		if transfer != nil && transfer.ReceiverConnID == connectionID {
+			return *transfer, true
+		}
+	}
+	return ActiveTransfer{}, false
 }
 
 var (

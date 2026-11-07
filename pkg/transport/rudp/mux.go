@@ -54,6 +54,12 @@ type PacketHandler interface {
 	OnSessionClosed(sess *Session, reason string)
 }
 
+// AckHandler receives raw ACK packets before the transport consumes them.
+// Applications can use this hook to relay acknowledgements for proxied streams.
+type AckHandler interface {
+	OnAckReceived(sess *Session, packet *protocol.Packet)
+}
+
 // Mux is a single-socket UDP reactor with per-session actor queues.
 type Mux struct {
 	conn       *net.UDPConn
@@ -316,6 +322,9 @@ func (m *Mux) processSessionPacket(sess *Session, pkt *protocol.Packet) {
 		stream.ProcessAck(pkt.Hdr.AckNum, pkt.Hdr.AckBitmap, pkt.Hdr.WindowSize)
 	}
 	if pkt.Hdr.MsgType == protocol.MsgAck {
+		if ackHandler, ok := m.handler.(AckHandler); ok {
+			ackHandler.OnAckReceived(sess, pkt)
+		}
 		return
 	}
 	// Sequence zero is retained for the pre-Step-5 auth/presence wire messages.

@@ -94,7 +94,10 @@ func (h *FileRelayHandler) HandleFileChunk(_ *rudp.Session, _ uint8, payload []b
 	if !ok || receiver.OutboundCh == nil {
 		return nil
 	}
-	seq := transfer.NextReceiverSeq()
+	seq, ok := state.ReserveReceiverSeq(transfer.TransferID)
+	if !ok {
+		return nil
+	}
 	raw, err := protocol.MarshalPacket(&protocol.Packet{
 		Hdr: protocol.Header{
 			Version:      protocol.ProtocolVersion,
@@ -117,6 +120,42 @@ func (h *FileRelayHandler) HandleFileChunk(_ *rudp.Session, _ uint8, payload []b
 		slog.Warn("file relay: receiver queue congested, dropped chunk", "transfer_id", transfer.TransferID)
 	}
 	return nil
+}
+
+// RelayAck relays receiver ACK/SACK state to the original sender.
+func (h *FileRelayHandler) RelayAck(sess *rudp.Session, packet *protocol.Packet) error {
+	if packet == nil {
+		return nil
+	}
+	transfer, ok := state.LookupActiveTransferByReceiverConnID(sess.ID())
+	if !ok {
+		return nil
+	}
+	sender, ok := state.LookupTargetByUsername(transfer.SenderUsername)
+	if !ok || sender.OutboundCh == nil {
+		return nil
+	}
+	raw, err := protocol.MarshalPacket(&protocol.Packet{
+		Hdr: protocol.Header{
+			Version:      protocol.ProtocolVersion,
+			Flags:        protocol.FlagACK,
+			MsgType:      protocol.MsgAck,
+			StreamID:     transfer.SenderStreamID,
+			ConnectionID: sender.ConnectionID,
+			AckNum:       packet.Hdr.AckNum,
+			AckBitmap:    packet.Hdr.AckBitmap,
+			WindowSize:   packet.Hdr.WindowSize,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("file relay: marshal ack: %w", err)
+	}
+	select {
+	case sender.OutboundCh <- raw:
+		return nil
+	case <-time.After(20 * time.Millisecond):
+		return fmt.Errorf("file relay: sender queue full while forwarding ack")
+	}
 }
 
 // HandleFileComplete removes the route and forwards completion to the sender.

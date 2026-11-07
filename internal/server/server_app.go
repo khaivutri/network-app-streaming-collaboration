@@ -161,6 +161,13 @@ func (app *ServerApp) OnMessageReceived(sess *rudp.Session, streamID, msgType ui
 	app.router.Dispatch(sess, streamID, msgType, payload)
 }
 
+// OnAckReceived forwards receiver SACK state to the sender of a relayed file.
+func (app *ServerApp) OnAckReceived(sess *rudp.Session, packet *protocol.Packet) {
+	if err := app.fileHdl.RelayAck(sess, packet); err != nil {
+		slog.Debug("server file ACK relay failed", "error", err)
+	}
+}
+
 // OnSessionClosed removes authenticated presence after transport closure.
 func (app *ServerApp) OnSessionClosed(sess *rudp.Session, reason string) {
 	if username, ok := state.LookupUsernameByConnID(sess.ID()); ok {
