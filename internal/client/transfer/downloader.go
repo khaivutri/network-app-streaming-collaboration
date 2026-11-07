@@ -181,6 +181,13 @@ func (d *Downloader) Progress() float64 {
 	return minFloat(100, float64(d.bytesWritten)*100/float64(d.fileSize))
 }
 
+// BytesWritten returns the number of unique payload bytes written to staging.
+func (d *Downloader) BytesWritten() int64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.bytesWritten
+}
+
 func minFloat(a, b float64) float64 {
 	if a < b {
 		return a

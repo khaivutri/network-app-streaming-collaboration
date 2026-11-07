@@ -385,19 +385,40 @@ func (c *ChatClient) handleFileChunk(packet *protocol.Packet) {
 	if err != nil {
 		return
 	}
-	c.store.UpdateFileProgress(&transfer.TransferProgress{TransferID: id, Direction: "DOWNLOAD", State: "TRANSFERRING", TransferredBytes: int64(chunk.ChunkIndex+1) * int64(len(chunk.Data)), Percentage: downloader.Progress()})
+	c.store.UpdateFileProgress(&transfer.TransferProgress{
+		TransferID:       id,
+		Direction:        "DOWNLOAD",
+		State:            "TRANSFERRING",
+		TransferredBytes: downloader.BytesWritten(),
+		Percentage:       downloader.Progress(),
+	})
 	if !complete {
 		return
 	}
 	checksum, verifyErr := downloader.FinalizeAndVerify()
 	if verifyErr != nil {
 		_ = c.send(packet.Hdr.StreamID, protocol.MsgFileCancel, protocol.FileCancelPayload{TransferID: id, Reason: protocol.FileCodeChecksumFailed, Timestamp: time.Now().UnixMilli()})
-		c.store.UpdateFileProgress(&transfer.TransferProgress{TransferID: id, State: "ERROR"})
+		c.transferMgr.Remove(id)
+		c.store.UpdateFileProgress(&transfer.TransferProgress{
+			TransferID:       id,
+			Direction:        "DOWNLOAD",
+			State:            "ERROR",
+			TransferredBytes: downloader.BytesWritten(),
+			Percentage:       downloader.Progress(),
+		})
 		fmt.Printf("\n[File Error] Mã băm SHA-256 không khớp! Đã hủy file.\n")
 		return
 	}
-	_ = c.send(packet.Hdr.StreamID, protocol.MsgFileComplete, protocol.FileCompletePayload{TransferID: id, VerifiedSHA256: checksum, TotalBytesReceived: int64(chunk.ChunkIndex+1) * int64(len(chunk.Data)), CompletedAt: time.Now().UnixMilli()})
-	c.store.UpdateFileProgress(&transfer.TransferProgress{TransferID: id, State: "COMPLETED", Percentage: 100})
+	bytesReceived := downloader.BytesWritten()
+	_ = c.send(packet.Hdr.StreamID, protocol.MsgFileComplete, protocol.FileCompletePayload{TransferID: id, VerifiedSHA256: checksum, TotalBytesReceived: bytesReceived, CompletedAt: time.Now().UnixMilli()})
+	c.transferMgr.Remove(id)
+	c.store.UpdateFileProgress(&transfer.TransferProgress{
+		TransferID:       id,
+		Direction:        "DOWNLOAD",
+		State:            "COMPLETED",
+		TransferredBytes: bytesReceived,
+		Percentage:       100,
+	})
 	fmt.Printf("\n[File Received Complete] Đã nhận đủ và xác thực SHA-256 thành công! File đã lưu vào thư mục: storage/downloads/\n")
 }
 
