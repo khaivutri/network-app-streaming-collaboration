@@ -7,6 +7,15 @@ import (
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/protocol"
 )
 
+// ConnectionState describes the local network connection state.
+type ConnectionState string
+
+const (
+	ConnStateConnected    ConnectionState = "CONNECTED"
+	ConnStateReconnecting ConnectionState = "RECONNECTING"
+	ConnStateDisconnected ConnectionState = "DISCONNECTED"
+)
+
 // ClientStore is the concurrency-safe local projection of server presence.
 type ClientStore struct {
 	mu             sync.RWMutex
@@ -17,6 +26,8 @@ type ClientStore struct {
 	directMessages map[string][]protocol.UnicastMessageServerPayload
 	deliveryStatus map[string]string
 	fileTransfers  map[string]*transfer.TransferProgress
+	connState      ConnectionState
+	stateListeners []chan ConnectionState
 }
 
 // NewClientStore creates an empty unauthenticated projection.
@@ -26,6 +37,7 @@ func NewClientStore() *ClientStore {
 		directMessages: make(map[string][]protocol.UnicastMessageServerPayload),
 		deliveryStatus: make(map[string]string),
 		fileTransfers:  make(map[string]*transfer.TransferProgress),
+		connState:      ConnStateDisconnected,
 	}
 }
 
@@ -91,6 +103,37 @@ func (cs *ClientStore) ClearSession() {
 	cs.isLoggedIn = false
 	cs.currentUser = nil
 	clear(cs.onlinePeers)
+	cs.connState = ConnStateDisconnected
+}
+
+// SetConnectionState updates connection state and notifies listeners without blocking.
+func (cs *ClientStore) SetConnectionState(next ConnectionState) {
+	cs.mu.Lock()
+	cs.connState = next
+	listeners := append([]chan ConnectionState(nil), cs.stateListeners...)
+	cs.mu.Unlock()
+	for _, listener := range listeners {
+		select {
+		case listener <- next:
+		default:
+		}
+	}
+}
+
+// ConnectionState returns the current connection state.
+func (cs *ClientStore) ConnectionState() ConnectionState {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.connState
+}
+
+// SubscribeConnectionState registers a buffered state-event channel.
+func (cs *ClientStore) SubscribeConnectionState() <-chan ConnectionState {
+	ch := make(chan ConnectionState, 4)
+	cs.mu.Lock()
+	cs.stateListeners = append(cs.stateListeners, ch)
+	cs.mu.Unlock()
+	return ch
 }
 
 // IsLoggedIn reports the current local session state.
