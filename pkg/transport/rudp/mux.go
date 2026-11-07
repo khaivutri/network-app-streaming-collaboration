@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -43,7 +44,7 @@ func DefaultMuxConfig(listenAddr string) MuxConfig {
 		SessionQueueSize:   2048,
 		HandshakeTimeout:   3 * time.Second,
 		ReaperInterval:     time.Second,
-		SessionIdleTimeout: 15 * time.Second,
+		SessionIdleTimeout: 10 * time.Second,
 	}
 }
 
@@ -94,7 +95,7 @@ func NewMux(cfg MuxConfig, handler PacketHandler) (*Mux, error) {
 		cfg.ReaperInterval = time.Second
 	}
 	if cfg.SessionIdleTimeout <= 0 {
-		cfg.SessionIdleTimeout = 15 * time.Second
+		cfg.SessionIdleTimeout = 10 * time.Second
 	}
 	addr, err := net.ResolveUDPAddr("udp", cfg.ListenAddr)
 	if err != nil {
@@ -109,6 +110,9 @@ func NewMux(cfg MuxConfig, handler PacketHandler) (*Mux, error) {
 	}
 	if cfg.SocketWriteBuffer > 0 {
 		_ = conn.SetWriteBuffer(cfg.SocketWriteBuffer)
+	}
+	if err := configureUDPSocket(conn); err != nil {
+		slog.Debug("rudp socket resilience configuration unavailable", "error", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	m := &Mux{
@@ -210,6 +214,10 @@ func (m *Mux) ingressLoop() {
 			m.bufPool.Put(bufPtr)
 			if m.closed.Load() {
 				return
+			}
+			if isTransientSocketError(err) {
+				slog.Debug("rudp transient read failure", "error", err)
+				continue
 			}
 			slog.Debug("rudp read failed", "error", err)
 			continue
@@ -373,10 +381,18 @@ func (m *Mux) reaperLoop() {
 			}
 			m.sessionsMu.RUnlock()
 			for _, id := range expired {
-				m.CloseSession(id, "IDLE_TIMEOUT")
+				m.CloseSession(id, "TIMEOUT")
 			}
 		}
 	}
+}
+
+func isTransientSocketError(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "10054") || strings.Contains(text, "wsarecvfrom") || strings.Contains(text, "forcibly closed") || strings.Contains(text, "connection reset") || strings.Contains(text, "timeout")
 }
 
 func remoteKey(addr *net.UDPAddr) string {
