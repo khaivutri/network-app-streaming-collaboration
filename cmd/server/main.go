@@ -65,6 +65,14 @@ func main() {
 			fmt.Printf("Step 6 Reliable File Transfer Server listening on %s\n", srvApp.Addr())
 			err = srvApp.Serve(ctx)
 		}
+	} else if *mode == "step7-resilience" {
+		srvApp, srvErr := server.NewServerApp(*addr, *users)
+		if srvErr != nil {
+			err = srvErr
+		} else {
+			fmt.Printf("Step 7 Resilience Server listening on %s\n", srvApp.Addr())
+			err = srvApp.Serve(ctx)
+		}
 	} else {
 		err = fmt.Errorf("unsupported mode %q", *mode)
 	}

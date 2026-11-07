@@ -79,6 +79,9 @@ func main() {
 	} else if *mode == "step6-file" {
 		returnWithError(runStep6File(*server, *user, *pass))
 		return
+	} else if *mode == "step7-resilience" {
+		returnWithError(runStep6File(*server, *user, *pass))
+		return
 	} else {
 		err = fmt.Errorf("unsupported mode %q", *mode)
 	}
