@@ -8,9 +8,10 @@ import (
 )
 
 const (
-	progressBarWidth = 30
-	bytesPerKilobyte = 1024
-	bytesPerMegabyte = bytesPerKilobyte * bytesPerKilobyte
+	progressBarWidth  = 30
+	bytesPerKilobyte  = 1024
+	bytesPerMegabyte  = bytesPerKilobyte * bytesPerKilobyte
+	minRenderInterval = 100 * time.Millisecond
 )
 
 // ProgressBar renders one transfer's live progress without taking ownership
@@ -20,6 +21,7 @@ type ProgressBar struct {
 	label       string
 	totalBytes  int64
 	startedAt   time.Time
+	lastRender  time.Time
 	transferred int64
 	finished    bool
 }
@@ -33,11 +35,17 @@ func NewProgressBar(label string, totalBytes int64) *ProgressBar {
 	}
 }
 
-// Update records transferred bytes and returns the current terminal line.
+// Update records transferred bytes and returns the current terminal line when
+// the render throttle interval has elapsed or the transfer reaches completion.
 func (bar *ProgressBar) Update(transferred int64) string {
 	bar.mu.Lock()
 	defer bar.mu.Unlock()
 	bar.transferred = clampProgressBytes(transferred, bar.totalBytes)
+	now := time.Now()
+	if !bar.lastRender.IsZero() && bar.transferred < bar.totalBytes && now.Sub(bar.lastRender) < minRenderInterval {
+		return ""
+	}
+	bar.lastRender = now
 	return bar.renderLocked()
 }
 

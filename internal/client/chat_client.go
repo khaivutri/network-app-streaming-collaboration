@@ -29,8 +29,14 @@ type ChatClient struct {
 	progressBars    map[string]*transfer.ProgressBar
 }
 
+const clientSocketBufferSize = 4 * 1024 * 1024
+
 // NewChatClient creates a chat facade over an existing authenticated socket.
 func NewChatClient(conn *net.UDPConn, server *net.UDPAddr, connectionID uint32, store *state.ClientStore) *ChatClient {
+	if conn != nil {
+		_ = conn.SetReadBuffer(clientSocketBufferSize)
+		_ = conn.SetWriteBuffer(clientSocketBufferSize)
+	}
 	return &ChatClient{
 		conn:            conn,
 		server:          server,

@@ -102,10 +102,19 @@ func runStep6File(serverAddr, username, password string) error {
 		return fmt.Errorf("file client bind socket: %w", err)
 	}
 	defer conn.Close()
+	_ = conn.SetReadBuffer(4 * 1024 * 1024)
+	_ = conn.SetWriteBuffer(4 * 1024 * 1024)
 	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		return err
 	}
-	syn, err := protocol.MarshalPacket(&protocol.Packet{Hdr: protocol.Header{Version: protocol.ProtocolVersion, Flags: protocol.FlagSYN, MsgType: protocol.MsgCtrlHandshake, StreamID: protocol.StreamControl}})
+	syn, err := protocol.MarshalPacket(&protocol.Packet{
+		Hdr: protocol.Header{
+			Version:  protocol.ProtocolVersion,
+			Flags:    protocol.FlagSYN,
+			MsgType:  protocol.MsgCtrlHandshake,
+			StreamID: protocol.StreamControl,
+		},
+	})
 	if err != nil {
 		return err
 	}
@@ -121,7 +130,16 @@ func runStep6File(serverAddr, username, password string) error {
 	if err != nil {
 		return err
 	}
-	ack, err := protocol.MarshalPacket(&protocol.Packet{Hdr: protocol.Header{Version: protocol.ProtocolVersion, Flags: protocol.FlagACK, MsgType: protocol.MsgCtrlHandshake, StreamID: protocol.StreamControl, ConnectionID: welcome.Hdr.ConnectionID, AckNum: 1}})
+	ack, err := protocol.MarshalPacket(&protocol.Packet{
+		Hdr: protocol.Header{
+			Version:      protocol.ProtocolVersion,
+			Flags:        protocol.FlagACK,
+			MsgType:      protocol.MsgCtrlHandshake,
+			StreamID:     protocol.StreamControl,
+			ConnectionID: welcome.Hdr.ConnectionID,
+			AckNum:       1,
+		},
+	})
 	if err != nil {
 		return err
 	}
