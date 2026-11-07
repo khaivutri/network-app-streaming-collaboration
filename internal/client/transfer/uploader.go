@@ -66,22 +66,22 @@ func NewUploader(transferID, filePath string, chunkSize int) (*Uploader, *protoc
 	checksum := hex.EncodeToString(hash.Sum(nil))
 	name := filepath.Base(filePath)
 	return &Uploader{
-		transferID: transferID, 
-		filePath: filePath, 
-		fileName: name, 
-		fileSize: size, 
-		chunkSize: chunkSize, 
-		totalChunks: total, 
-		sha256Hex: checksum, 
-		sourceFile: source,
-		}, 
+			transferID:  transferID,
+			filePath:    filePath,
+			fileName:    name,
+			fileSize:    size,
+			chunkSize:   chunkSize,
+			totalChunks: total,
+			sha256Hex:   checksum,
+			sourceFile:  source,
+		},
 		&protocol.FileInitPayload{
-			TransferID: transferID, 
-			FileName: name, MimeType: "application/octet-stream", 
-			FileSize: size, ChunkSize: chunkSize, 
-			TotalChunks: total, 
-			SHA256: checksum, 
-			CreatedAt: time.Now().UnixMilli(),
+			TransferID: transferID,
+			FileName:   name, MimeType: "application/octet-stream",
+			FileSize: size, ChunkSize: chunkSize,
+			TotalChunks: total,
+			SHA256:      checksum,
+			CreatedAt:   time.Now().UnixMilli(),
 		}, nil
 }
 
@@ -98,6 +98,13 @@ func (u *Uploader) ReadChunk(index uint32) ([]byte, error) {
 		return nil, fmt.Errorf("transfer: read chunk %d: %w", index, err)
 	}
 	return data[:n], nil
+}
+
+// FileSize returns the immutable source size used for progress calculations.
+func (u *Uploader) FileSize() int64 {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.fileSize
 }
 
 // Close releases the source file.

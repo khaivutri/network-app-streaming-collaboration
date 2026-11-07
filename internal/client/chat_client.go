@@ -26,6 +26,7 @@ type ChatClient struct {
 	streamPool      *rudp.StreamPool
 	transferMgr     *transfer.Manager
 	transferStreams map[string]uint8
+	progressBars    map[string]*transfer.ProgressBar
 }
 
 // NewChatClient creates a chat facade over an existing authenticated socket.
@@ -39,6 +40,7 @@ func NewChatClient(conn *net.UDPConn, server *net.UDPAddr, connectionID uint32, 
 		streamPool:      rudp.NewStreamPool(),
 		transferMgr:     transfer.NewManager(filepath.Join("storage", "staging"), filepath.Join("storage", "downloads")),
 		transferStreams: make(map[string]uint8),
+		progressBars:    make(map[string]*transfer.ProgressBar),
 	}
 }
 
@@ -61,6 +63,7 @@ func (c *ChatClient) SendFile(recipient, filePath, caption string) (string, erro
 	initPayload.Caption = caption
 	c.transferMgr.RegisterUploader(id, uploader)
 	c.store.UpdateFileProgress(&transfer.TransferProgress{TransferID: id, Direction: "UPLOAD", Peer: recipient, FileName: initPayload.FileName, FileSize: initPayload.FileSize, State: "INIT"})
+	c.setProgressBar(id, transfer.NewProgressBar("Upload "+initPayload.FileName, initPayload.FileSize))
 	if err := c.send(streamID, protocol.MsgFileInit, initPayload); err != nil {
 		_ = uploader.Close()
 		_ = c.streamPool.Release(streamID)
@@ -83,6 +86,7 @@ func (c *ChatClient) CancelTransfer(id string) error {
 			return err
 		}
 	}
+	c.removeProgressBar(id)
 	if downloader != nil {
 		if err := downloader.Cleanup(); err != nil {
 			return err
@@ -295,6 +299,7 @@ func (c *ChatClient) handleFileInit(packet *protocol.Packet) {
 		fmt.Printf("[File Error] Không thể tạo file tạm: %v\n", err)
 	} else {
 		c.transferMgr.RegisterDownloader(initPayload.TransferID, downloader)
+		c.setProgressBar(initPayload.TransferID, transfer.NewProgressBar("Download "+initPayload.FileName, initPayload.FileSize))
 		c.store.UpdateFileProgress(&transfer.TransferProgress{TransferID: initPayload.TransferID, Direction: "DOWNLOAD", Peer: initPayload.Sender, FileName: initPayload.FileName, FileSize: initPayload.FileSize, State: "INIT"})
 		fmt.Printf("[File Accepted] Đã chấp nhận và sẵn sàng nhận các chunk...\n")
 	}
@@ -317,6 +322,7 @@ func (c *ChatClient) handleFileResponse(packet *protocol.Packet) {
 			State:      "REJECTED",
 		})
 		c.releaseTransferStream(response.TransferID)
+		c.removeProgressBar(response.TransferID)
 		fmt.Printf("\n[File Transfer Failed] Người nhận từ chối hoặc ngoại tuyến: %s (code=%s)\n", response.Message, response.Code)
 		return
 	}
@@ -326,6 +332,9 @@ func (c *ChatClient) handleFileResponse(packet *protocol.Packet) {
 		return
 	}
 	go func() {
+		progressBar := c.getProgressBar(response.TransferID)
+		var transferredBytes int64
+		completed := true
 		ticker := time.NewTicker(50 * time.Millisecond)
 		defer ticker.Stop()
 		done := make(chan struct{})
@@ -350,23 +359,35 @@ func (c *ChatClient) handleFileResponse(packet *protocol.Packet) {
 			}
 		}()
 		for index := uint32(0); ; index++ {
+			completed = false
 			stream := c.getStream(packet.Hdr.StreamID)
 			for stream.InFlightCount() >= int(stream.PeerWindowSize()) {
 				time.Sleep(2 * time.Millisecond)
 			}
 			data, readErr := uploader.ReadChunk(index)
 			if readErr != nil || len(data) == 0 {
+				completed = readErr == nil
 				break
 			}
 			idBytes, parseErr := protocol.ParseUUID(response.TransferID)
 			if parseErr != nil {
+				completed = false
 				break
 			}
 			payload, marshalErr := protocol.MarshalFileChunk(&protocol.FileChunkPacket{TransferID: idBytes, ChunkIndex: index, Data: data})
 			if marshalErr != nil || c.sendPayload(packet.Hdr.StreamID, protocol.MsgFileChunk, payload) != nil {
+				completed = false
 				break
 			}
-			c.store.UpdateFileProgress(&transfer.TransferProgress{TransferID: response.TransferID, Direction: "UPLOAD", State: "TRANSFERRING", TransferredBytes: int64(index+1) * int64(len(data))})
+			completed = true
+			transferredBytes += int64(len(data))
+			if progressBar != nil {
+				fmt.Printf("\r%s", progressBar.Update(transferredBytes))
+			}
+			c.store.UpdateFileProgress(&transfer.TransferProgress{TransferID: response.TransferID, Direction: "UPLOAD", State: "TRANSFERRING", TransferredBytes: transferredBytes, Percentage: float64(transferredBytes) * 100 / float64(uploader.FileSize())})
+		}
+		if progressBar != nil && completed {
+			fmt.Printf("\r%s\n", progressBar.Complete())
 		}
 	}()
 }
@@ -385,6 +406,9 @@ func (c *ChatClient) handleFileChunk(packet *protocol.Packet) {
 	if err != nil {
 		return
 	}
+	if progressBar := c.getProgressBar(id); progressBar != nil {
+		fmt.Printf("\r%s", progressBar.Update(downloader.BytesWritten()))
+	}
 	c.store.UpdateFileProgress(&transfer.TransferProgress{
 		TransferID:       id,
 		Direction:        "DOWNLOAD",
@@ -399,6 +423,7 @@ func (c *ChatClient) handleFileChunk(packet *protocol.Packet) {
 	if verifyErr != nil {
 		_ = c.send(packet.Hdr.StreamID, protocol.MsgFileCancel, protocol.FileCancelPayload{TransferID: id, Reason: protocol.FileCodeChecksumFailed, Timestamp: time.Now().UnixMilli()})
 		c.transferMgr.Remove(id)
+		c.removeProgressBar(id)
 		c.store.UpdateFileProgress(&transfer.TransferProgress{
 			TransferID:       id,
 			Direction:        "DOWNLOAD",
@@ -412,6 +437,10 @@ func (c *ChatClient) handleFileChunk(packet *protocol.Packet) {
 	bytesReceived := downloader.BytesWritten()
 	_ = c.send(packet.Hdr.StreamID, protocol.MsgFileComplete, protocol.FileCompletePayload{TransferID: id, VerifiedSHA256: checksum, TotalBytesReceived: bytesReceived, CompletedAt: time.Now().UnixMilli()})
 	c.transferMgr.Remove(id)
+	if progressBar := c.getProgressBar(id); progressBar != nil {
+		fmt.Printf("\r%s\n", progressBar.Complete())
+	}
+	c.removeProgressBar(id)
 	c.store.UpdateFileProgress(&transfer.TransferProgress{
 		TransferID:       id,
 		Direction:        "DOWNLOAD",
@@ -431,6 +460,7 @@ func (c *ChatClient) handleFileComplete(packet *protocol.Packet) {
 	if uploader != nil {
 		_ = uploader.Close()
 	}
+	c.removeProgressBar(complete.TransferID)
 	c.store.UpdateFileProgress(&transfer.TransferProgress{TransferID: complete.TransferID, State: "COMPLETED", Percentage: 100})
 	c.releaseTransferStream(complete.TransferID)
 	fmt.Printf("\n[File Transfer Success] Người nhận đã nhận thành công 100%% và kiểm tra SHA-256 trùng khớp! (transfer_id=%s)\n", complete.TransferID)
@@ -448,6 +478,7 @@ func (c *ChatClient) handleFileCancel(packet *protocol.Packet) {
 	if downloader != nil {
 		_ = downloader.Cleanup()
 	}
+	c.removeProgressBar(cancel.TransferID)
 	c.store.UpdateFileProgress(&transfer.TransferProgress{TransferID: cancel.TransferID, State: "CANCELLED"})
 	c.releaseTransferStream(cancel.TransferID)
 	fmt.Printf("\n[File Transfer Cancelled] Quá trình truyền file bị hủy: %s\n", cancel.Reason)
@@ -472,6 +503,27 @@ func (c *ChatClient) releaseTransferStream(id string) {
 	if ok {
 		_ = c.streamPool.Release(streamID)
 	}
+}
+
+// setProgressBar associates a renderer with an active transfer.
+func (c *ChatClient) setProgressBar(id string, bar *transfer.ProgressBar) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.progressBars[id] = bar
+}
+
+// getProgressBar returns the renderer for an active transfer.
+func (c *ChatClient) getProgressBar(id string) *transfer.ProgressBar {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.progressBars[id]
+}
+
+// removeProgressBar releases terminal progress state after transfer shutdown.
+func (c *ChatClient) removeProgressBar(id string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.progressBars, id)
 }
 
 func (c *ChatClient) sendAck(streamID uint8) {
