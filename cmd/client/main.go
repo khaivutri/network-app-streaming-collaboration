@@ -11,6 +11,7 @@ import (
 
 	"github.com/khaivutri/network-app-streaming-collaboration/internal/client"
 	"github.com/khaivutri/network-app-streaming-collaboration/internal/client/state"
+	"github.com/khaivutri/network-app-streaming-collaboration/internal/client/transfer"
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/protocol"
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/transport"
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/transport/rudp"
@@ -164,6 +165,15 @@ func runStep6File(serverAddr, username, password string) error {
 			recipient := tokens[1]
 			filePath := tokens[2]
 			caption := strings.Join(tokens[3:], " ")
+			if tokens[2] == "&" && len(tokens) > 3 {
+				filePath = tokens[3]
+				caption = strings.Join(tokens[4:], " ")
+			}
+			filePath = transfer.CleanInputPath(filePath)
+			if _, statErr := os.Stat(filePath); statErr != nil {
+				fmt.Printf("[Lỗi File] Đường dẫn không tồn tại hoặc không thể đọc: %s (%v)\n", filePath, statErr)
+				continue
+			}
 			id, sendErr := chat.SendFile(recipient, filePath, caption)
 			fmt.Printf("transfer=%s err=%v\n", id, sendErr)
 			continue
