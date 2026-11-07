@@ -327,8 +327,9 @@ func (m *Mux) processSessionPacket(sess *Session, pkt *protocol.Packet) {
 		}
 		return
 	}
-	// Sequence zero is retained for the pre-Step-5 auth/presence wire messages.
-	if !pkt.Hdr.HasFlag(protocol.FlagREL) || pkt.Hdr.SeqNum == 0 {
+	// Sequence zero is retained for the pre-Step-5 auth/presence wire messages,
+	// and MsgFileChunk is relayed end-to-end so receiver SACK state drives retransmission.
+	if !pkt.Hdr.HasFlag(protocol.FlagREL) || pkt.Hdr.SeqNum == 0 || pkt.Hdr.MsgType == protocol.MsgFileChunk {
 		if m.handler != nil {
 			safeMessage(m.handler, sess, pkt.Hdr.StreamID, pkt.Hdr.MsgType, pkt.Payload)
 		}

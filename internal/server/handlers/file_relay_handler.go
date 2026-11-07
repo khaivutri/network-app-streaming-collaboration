@@ -28,7 +28,13 @@ func (h *FileRelayHandler) HandleFileInit(sess *rudp.Session, streamID uint8, pa
 	}
 	receiver, online := state.LookupTargetByUsername(request.Recipient)
 	if !online || receiver.OutboundCh == nil {
-		return h.sendJSON(sess, streamID, protocol.MsgFileResponse, protocol.FileResponsePayload{TransferID: request.TransferID, Accepted: false, Code: protocol.FileCodeRejected, Message: "recipient is offline", Timestamp: time.Now().UnixMilli()})
+		return h.sendJSON(sess, streamID, protocol.MsgFileResponse, protocol.FileResponsePayload{
+			TransferID: request.TransferID,
+			Accepted:   false,
+			Code:       protocol.FileCodeRejected,
+			Message:    "recipient is offline",
+			Timestamp:  time.Now().UnixMilli(),
+		})
 	}
 	idBytes, err := protocol.ParseUUID(request.TransferID)
 	if err != nil {
@@ -80,13 +86,14 @@ func (h *FileRelayHandler) HandleFileResponse(_ *rudp.Session, _ uint8, payload 
 }
 
 // HandleFileChunk relays one bounded binary chunk directly to the receiver queue.
+// Each chunk is stamped with the deterministic sequence number ChunkIndex + 1 so
+// retransmitted chunks map back to their original receiver sequence hole.
 func (h *FileRelayHandler) HandleFileChunk(_ *rudp.Session, _ uint8, payload []byte) error {
-	if _, err := protocol.UnmarshalFileChunk(payload); err != nil {
+	chunk, err := protocol.UnmarshalFileChunk(payload)
+	if err != nil {
 		return err
 	}
-	var id [16]byte
-	copy(id[:], payload[:16])
-	transfer, ok := state.LookupActiveTransferByBytes(id)
+	transfer, ok := state.LookupActiveTransferByBytes(chunk.TransferID)
 	if !ok {
 		return nil
 	}
@@ -94,10 +101,7 @@ func (h *FileRelayHandler) HandleFileChunk(_ *rudp.Session, _ uint8, payload []b
 	if !ok || receiver.OutboundCh == nil {
 		return nil
 	}
-	seq, ok := state.ReserveReceiverSeq(transfer.TransferID)
-	if !ok {
-		return nil
-	}
+	seq := chunk.ChunkIndex + 1
 	raw, err := protocol.MarshalPacket(&protocol.Packet{
 		Hdr: protocol.Header{
 			Version:      protocol.ProtocolVersion,
@@ -127,7 +131,7 @@ func (h *FileRelayHandler) RelayAck(sess *rudp.Session, packet *protocol.Packet)
 	if packet == nil {
 		return nil
 	}
-	transfer, ok := state.LookupActiveTransferByReceiverConnID(sess.ID())
+	transfer, ok := state.LookupActiveTransferByReceiver(sess.ID(), packet.Hdr.StreamID)
 	if !ok {
 		return nil
 	}
@@ -216,7 +220,17 @@ func (h *FileRelayHandler) sendJSON(sess *rudp.Session, streamID, msgType uint8,
 
 // Forward queues a file-control packet for a peer session.
 func (h *FileRelayHandler) Forward(queue chan []byte, connID uint32, streamID, msgType uint8, payload []byte) error {
-	raw, err := protocol.MarshalPacket(&protocol.Packet{Hdr: protocol.Header{Version: protocol.ProtocolVersion, Flags: protocol.FlagREL | protocol.FlagORD, MsgType: msgType, StreamID: streamID, ConnectionID: connID, WindowSize: protocol.DefaultWindowSize}, Payload: payload})
+	raw, err := protocol.MarshalPacket(&protocol.Packet{
+		Hdr: protocol.Header{
+			Version:      protocol.ProtocolVersion,
+			Flags:        protocol.FlagREL | protocol.FlagORD,
+			MsgType:      msgType,
+			StreamID:     streamID,
+			ConnectionID: connID,
+			WindowSize:   protocol.DefaultWindowSize,
+		},
+		Payload: payload,
+	})
 	if err != nil {
 		return fmt.Errorf("file relay: marshal forward: %w", err)
 	}

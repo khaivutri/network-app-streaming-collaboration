@@ -46,10 +46,19 @@ func ReserveReceiverSeq(transferID string) (uint32, bool) {
 
 // LookupActiveTransferByReceiverConnID finds the transfer routed to a receiver.
 func LookupActiveTransferByReceiverConnID(connectionID uint32) (ActiveTransfer, bool) {
+	return LookupActiveTransferByReceiver(connectionID, 0)
+}
+
+// LookupActiveTransferByReceiver finds the active transfer matching a receiver
+// connection ID and optional stream ID.
+func LookupActiveTransferByReceiver(connectionID uint32, streamID uint8) (ActiveTransfer, bool) {
 	GlobalTransfersMu.RLock()
 	defer GlobalTransfersMu.RUnlock()
 	for _, transfer := range GlobalActiveTransfers {
-		if transfer != nil && transfer.ReceiverConnID == connectionID {
+		if transfer == nil || transfer.ReceiverConnID != connectionID {
+			continue
+		}
+		if streamID == 0 || transfer.ReceiverStreamID == streamID {
 			return *transfer, true
 		}
 	}
