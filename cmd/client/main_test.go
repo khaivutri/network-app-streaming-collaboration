@@ -47,4 +47,3 @@ func TestParseCommandLine(t *testing.T) {
 		})
 	}
 }
-

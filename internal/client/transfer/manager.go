@@ -27,11 +27,11 @@ type Manager struct {
 // NewManager creates a local transfer manager.
 func NewManager(stagingDir, downloadDir string) *Manager {
 	return &Manager{
-		stagingDir: stagingDir, 
-		downloadDir: downloadDir, 
-		uploaders: make(map[string]*Uploader), 
-		downloaders: make(map[string]*Downloader), 
-		progress: make(map[string]*TransferProgress),
+		stagingDir:  stagingDir,
+		downloadDir: downloadDir,
+		uploaders:   make(map[string]*Uploader),
+		downloaders: make(map[string]*Downloader),
+		progress:    make(map[string]*TransferProgress),
 	}
 }
 
