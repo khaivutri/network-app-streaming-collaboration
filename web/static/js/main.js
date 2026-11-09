@@ -11,6 +11,7 @@ const browserStore = createStore();
 let stopEvents = null;
 let selectedPeer = null;
 let unsubscribeRender = null;
+const uiState = { broadcastDraft: "", directDrafts: new Map(), selectedFiles: new Map() };
 
 function renderUI(snapshot) {
   if (!snapshot.authenticated) {
@@ -20,12 +21,15 @@ function renderUI(snapshot) {
     renderDirectChat(appRoot, snapshot, selectedPeer, {
       onBack: () => { selectedPeer = null; renderUI(browserStore.snapshot()); },
       onChanged: bootstrap,
+      onOpenPeer: (peer) => { selectedPeer = peer; renderUI(browserStore.snapshot()); },
+      uiState,
     });
   } else {
     renderWorkspace(appRoot, snapshot, {
       onOpenPeer: (peer) => { selectedPeer = peer; renderUI(browserStore.snapshot()); },
       onChanged: renderUI,
       onRefresh: bootstrap,
+      uiState,
     });
   }
 }
@@ -40,7 +44,15 @@ async function bootstrap() {
       stopEvents = null;
     }
     if (session.authenticated) {
-      stopEvents = connectEvents((name, data) => { browserStore.applyEvent(name, data); }, () => showToast("Mất kết nối sự kiện, đang thử lại...", "error"));
+      let warned = false;
+      stopEvents = connectEvents(
+        (name, data) => { browserStore.applyEvent(name, data); },
+        () => { if (!warned) showToast("Mất kết nối sự kiện, đang thử lại...", "error"); warned = true; },
+        async () => {
+          try { browserStore.replaceSession(await API.getSession()); warned = false; }
+          catch (error) { console.error("SSE resync failed", error); }
+        },
+      );
     }
     renderUI(browserStore.snapshot());
   } catch (error) {
