@@ -7,7 +7,7 @@ ADDR ?= :9000
 SERVER ?= 127.0.0.1:9000
 
 .DEFAULT_GOAL := help
-.PHONY: help fmt fmt-check vet test test-proto test-tcp test-rudp test-int race cover check build server-tcp client-tcp server-udp client-udp server-step3-auth client-step3-auth server-step4-concurrency client-step4-concurrency server-step5-chat client-step5-chat server-step6-file client-step6-file server-step7-resilience client-step7-resilience server-step8-security client-step8-security test-step4 test-step5 test-step6 test-step7 test-step8 smoke-step4 smoke-step5 smoke-step6 smoke-step7 smoke-step8 smoke-tcp smoke-udp clean clean-storage
+.PHONY: help fmt fmt-check vet test test-proto test-tcp test-rudp test-int race cover check build server-tcp client-tcp server-udp client-udp server-step3-auth client-step3-auth server-step4-concurrency client-step4-concurrency server-step5-chat client-step5-chat server-step6-file client-step6-file server-step7-resilience client-step7-resilience server-step8-security client-step8-security server-step9-http-ui client-step9-http-ui test-step4 test-step5 test-step6 test-step7 test-step8 test-step9 smoke-step4 smoke-step5 smoke-step6 smoke-step7 smoke-step8 smoke-step9 smoke-tcp smoke-udp clean clean-storage
 
 help: ## Show available commands
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
@@ -86,10 +86,18 @@ server-step8-security: ## Run Step 8 encrypted server
 	$(GO) run ./cmd/server --mode=step8-security --addr=$(ADDR) --users=configs/users.json
 client-step8-security: ## Run Step 8 encrypted client
 	$(GO) run ./cmd/client --mode=step8-security --server=$(SERVER) --user=hung.vo --pass=Password@123
+server-step9-http-ui: ## Run Step 9 encrypted backend server
+	$(GO) run ./cmd/server --mode=step9-http-ui --addr=$(ADDR) --users=configs/users.json
+client-step9-http-ui: ## Run Step 9 local HTTP UI client
+	$(GO) run ./cmd/client --mode=step9-http-ui --server=$(SERVER) --ui-addr=127.0.0.1:8081
 test-step8: ## Run Step 8 cryptographic security tests
 	$(GO) test -v -race -run=TestStep8 ./tests/integration/... ./pkg/crypto/... ./pkg/transport/rudp/... ./internal/client/...
+test-step9: ## Run Step 9 bridge and UI tests
+	$(GO) test -v -race -run=TestStep9 ./tests/integration/... ./internal/client/... ./web/...
 smoke-step8: build ## Run Step 8 security smoke test
 	@./$(BIN_DIR)/server --mode=step8-security --addr=127.0.0.1:19008 --users=configs/users.json & SRV_PID=$$!; trap "kill $$SRV_PID 2>/dev/null || true" EXIT; sleep 0.5; $(GO) test -v -race -run=TestStep8 ./tests/integration/...
+smoke-step9: build ## Run Step 9 HTTP UI smoke test
+	@./$(BIN_DIR)/server --mode=step9-http-ui --addr=127.0.0.1:19009 --users=configs/users.json & SRV_PID=$$!; trap "kill $$SRV_PID 2>/dev/null || true" EXIT; sleep 0.5; $(GO) test -v -race -run=TestStep9 ./tests/integration/...
 clean-storage: ## Remove partial and completed local transfer files
 	rm -rf storage/staging/* storage/downloads/*
 smoke-tcp: build ## Run TCP smoke test

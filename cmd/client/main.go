@@ -9,11 +9,15 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/khaivutri/network-app-streaming-collaboration/internal/client"
 	"github.com/khaivutri/network-app-streaming-collaboration/internal/client/state"
 	"github.com/khaivutri/network-app-streaming-collaboration/internal/client/transfer"
+	"github.com/khaivutri/network-app-streaming-collaboration/internal/client/webbridge"
 	security "github.com/khaivutri/network-app-streaming-collaboration/pkg/crypto"
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/protocol"
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/transport"
@@ -29,9 +33,18 @@ func main() {
 	server := flag.String("server", "127.0.0.1:9000", "server address")
 	user := flag.String("user", "", "authentication username")
 	pass := flag.String("pass", "", "authentication password")
+	uiAddr := flag.String("ui-addr", "127.0.0.1:8081", "local HTTP UI address")
+	storageDir := flag.String("storage-dir", "storage", "local client storage directory")
+	maxUploadBytes := flag.Int64("max-upload-bytes", 1<<30, "maximum browser upload size")
 	count := flag.Int("count", 20, "concurrent client count")
 	timeout := flag.Duration("timeout", 5*time.Second, "handshake timeout")
 	flag.Parse()
+	if *mode == "step9-http-ui" {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		returnWithError(runStep9HTTPUI(ctx, *server, *uiAddr, *storageDir, *maxUploadBytes))
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 	var r *tcp_handshake.HandshakeResult
@@ -99,6 +112,39 @@ func main() {
 		return
 	}
 	fmt.Printf("Mode: %s\nLocalAddr -> ServerAddr: %s -> %s\nAssigned ConnectionID: 0x%08X (%d)\nServer Acknowledgment Message: %s\nRound-Trip Time (RTT): %d ms / %d µs\nFinal State: CONNECTED -> Gracefully Closed (FIN/FIN-ACK)\n", *mode, r.LocalAddr, r.ServerAddr, r.ConnectionID, r.ConnectionID, r.WelcomeMsg, r.RTTMillis, r.RTTMicros)
+}
+
+func runStep9HTTPUI(ctx context.Context, serverAddr, uiAddr, storageDir string, maxUploadBytes int64) error {
+	app := client.NewClientApp(client.AppConfig{
+		ServerAddr:       serverAddr,
+		StagingDir:       filepath.Join(storageDir, "staging"),
+		DownloadDir:      filepath.Join(storageDir, "downloads"),
+		HandshakeTimeout: 5 * time.Second,
+		RequestTimeout:   5 * time.Second,
+	})
+	bridge, err := webbridge.NewServer(app, webbridge.Config{
+		ListenAddr:     uiAddr,
+		UploadDir:      filepath.Join(storageDir, "staging", "uploads"),
+		MaxUploadBytes: maxUploadBytes,
+	})
+	if err != nil {
+		return err
+	}
+	serverErr := make(chan error, 1)
+	go func() { serverErr <- bridge.Start(ctx) }()
+	// The HTTP bridge intentionally does not auto-open a browser; this URL is
+	// deterministic for multi-client demos and keeps the agent cross-platform.
+	fmt.Printf("Step 9 Local UI listening on http://%s\n", uiAddr)
+	select {
+	case err := <-serverErr:
+		_ = app.Shutdown(context.Background())
+		return err
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = bridge.Shutdown(shutdownCtx)
+		return app.Shutdown(shutdownCtx)
+	}
 }
 
 func runStep8Security(serverAddr, username, password string) error {

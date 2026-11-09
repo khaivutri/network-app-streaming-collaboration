@@ -81,6 +81,14 @@ func main() {
 			fmt.Printf("Step 8 Security Server (X25519 + AES-256-GCM) listening on %s\n", srvApp.Addr())
 			err = srvApp.Serve(ctx)
 		}
+	} else if *mode == "step9-http-ui" {
+		srvApp, srvErr := server.NewServerApp(*addr, *users)
+		if srvErr != nil {
+			err = srvErr
+		} else {
+			fmt.Printf("Step 9 HTTP UI backend server (AES-256-GCM) listening on %s\n", srvApp.Addr())
+			err = srvApp.Serve(ctx)
+		}
 	} else {
 		err = fmt.Errorf("unsupported mode %q", *mode)
 	}
