@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/khaivutri/network-app-streaming-collaboration/internal/client/events"
 	"github.com/khaivutri/network-app-streaming-collaboration/internal/client/state"
 	"github.com/khaivutri/network-app-streaming-collaboration/internal/client/transfer"
 	security "github.com/khaivutri/network-app-streaming-collaboration/pkg/crypto"
@@ -35,6 +36,7 @@ type ChatClient struct {
 	lastError        string
 	cipherMu         sync.RWMutex
 	cipher           *security.SessionCipher
+	eventBus         *events.Bus
 }
 
 // SetCipher enables directional encryption for chat and file traffic.
@@ -54,6 +56,11 @@ const clientSocketBufferSize = 4 * 1024 * 1024
 
 // NewChatClient creates a chat facade over an existing authenticated socket.
 func NewChatClient(conn *net.UDPConn, server *net.UDPAddr, connectionID uint32, store *state.ClientStore) *ChatClient {
+	return NewChatClientWithStorage(conn, server, connectionID, store, filepath.Join("storage", "staging"), filepath.Join("storage", "downloads"))
+}
+
+// NewChatClientWithStorage creates a chat facade with explicit transfer directories.
+func NewChatClientWithStorage(conn *net.UDPConn, server *net.UDPAddr, connectionID uint32, store *state.ClientStore, stagingDir, downloadDir string) *ChatClient {
 	if conn != nil {
 		_ = conn.SetReadBuffer(clientSocketBufferSize)
 		_ = conn.SetWriteBuffer(clientSocketBufferSize)
@@ -65,7 +72,7 @@ func NewChatClient(conn *net.UDPConn, server *net.UDPAddr, connectionID uint32, 
 		store:            store,
 		streams:          make(map[uint8]*rudp.Stream),
 		streamPool:       rudp.NewStreamPool(),
-		transferMgr:      transfer.NewManager(filepath.Join("storage", "staging"), filepath.Join("storage", "downloads")),
+		transferMgr:      transfer.NewManager(stagingDir, downloadDir),
 		transferStreams:  make(map[string]uint8),
 		progressBars:     make(map[string]*transfer.ProgressBar),
 		rto:              rudp.NewAdaptiveRTO(rudp.DefaultRTOConfig()),
@@ -73,8 +80,16 @@ func NewChatClient(conn *net.UDPConn, server *net.UDPAddr, connectionID uint32, 
 	}
 }
 
+// SetEventBus connects network state changes to the local UI event stream.
+func (c *ChatClient) SetEventBus(bus *events.Bus) { c.eventBus = bus }
+
 // SendFile starts an outgoing file transfer after hashing the source file.
 func (c *ChatClient) SendFile(recipient, filePath, caption string) (string, error) {
+	return c.SendFileNamed(recipient, filePath, "", caption)
+}
+
+// SendFileNamed starts an outgoing transfer and preserves the caller's display name.
+func (c *ChatClient) SendFileNamed(recipient, filePath, displayName, caption string) (string, error) {
 	id, _, err := protocol.GenerateUUIDv4()
 	if err != nil {
 		return "", fmt.Errorf("chat client: generate transfer id: %w", err)
@@ -89,9 +104,12 @@ func (c *ChatClient) SendFile(recipient, filePath, caption string) (string, erro
 		return id, err
 	}
 	initPayload.Recipient = recipient
+	if displayName != "" {
+		initPayload.FileName = transfer.SanitizeFileName(displayName)
+	}
 	initPayload.Caption = caption
 	c.transferMgr.RegisterUploader(id, uploader)
-	c.store.UpdateFileProgress(&transfer.TransferProgress{
+	c.updateProgress(&transfer.TransferProgress{
 		TransferID: id,
 		Direction:  "UPLOAD",
 		Peer:       recipient,
@@ -132,7 +150,7 @@ func (c *ChatClient) CancelTransfer(id string) error {
 			return err
 		}
 	}
-	c.store.UpdateFileProgress(&transfer.TransferProgress{
+	c.updateProgress(&transfer.TransferProgress{
 		TransferID: id,
 		State:      "CANCELLED",
 	})
@@ -143,22 +161,48 @@ func (c *ChatClient) CancelTransfer(id string) error {
 // SendBroadcast sends a room message and returns its client correlation ID.
 func (c *ChatClient) SendBroadcast(content string) (string, error) {
 	id := fmt.Sprintf("cli-bcast-%d", time.Now().UnixNano())
+	return id, c.SendBroadcastWithID(context.Background(), id, content)
+}
+
+// SendBroadcastWithID sends a room message using a caller-provided correlation ID.
+func (c *ChatClient) SendBroadcastWithID(ctx context.Context, id, content string) error {
+	if id == "" {
+		id = fmt.Sprintf("cli-bcast-%d", time.Now().UnixNano())
+	}
 	if strings.TrimSpace(content) == "" {
-		return id, fmt.Errorf("chat client: content is empty")
+		return fmt.Errorf("chat client: content is empty")
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
 	}
 	err := c.send(protocol.StreamBroadcastChat, protocol.MsgMessBroadcast, protocol.BroadcastMessageClientPayload{
 		ClientMsgID: id,
 		Content:     content,
 		SentAt:      time.Now().UnixMilli(),
 	})
-	return id, err
+	return err
 }
 
 // SendDirect sends a one-to-one message and returns its client correlation ID.
 func (c *ChatClient) SendDirect(recipient, content string) (string, error) {
 	id := fmt.Sprintf("cli-dm-%d", time.Now().UnixNano())
+	return id, c.SendDirectWithID(context.Background(), id, recipient, content)
+}
+
+// SendDirectWithID sends a direct message using a caller-provided correlation ID.
+func (c *ChatClient) SendDirectWithID(ctx context.Context, id, recipient, content string) error {
+	if id == "" {
+		id = fmt.Sprintf("cli-dm-%d", time.Now().UnixNano())
+	}
 	if strings.TrimSpace(recipient) == "" || strings.TrimSpace(content) == "" {
-		return id, fmt.Errorf("chat client: recipient and content are required")
+		return fmt.Errorf("chat client: recipient and content are required")
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
 	}
 	err := c.send(protocol.StreamDirectChat, protocol.MsgMessUnicast, protocol.UnicastMessageClientPayload{
 		ClientMsgID: id,
@@ -166,7 +210,33 @@ func (c *ChatClient) SendDirect(recipient, content string) (string, error) {
 		Content:     content,
 		SentAt:      time.Now().UnixMilli(),
 	})
-	return id, err
+	return err
+}
+
+// SendLogout sends a best-effort control request while the chat listener owns the socket.
+func (c *ChatClient) SendLogout(username string) error {
+	return c.send(protocol.StreamControl, protocol.MsgLogout, protocol.LogoutPayload{
+		RequestID: fmt.Sprintf("logout-%d", time.Now().UnixNano()),
+		Username:  username,
+		Reason:    "USER_INITIATED",
+		Timestamp: time.Now().UnixMilli(),
+	})
+}
+
+// RefreshPeers requests a fresh server-side presence snapshot.
+func (c *ChatClient) RefreshPeers(ctx context.Context) error {
+	requestID := fmt.Sprintf("peers-%d", time.Now().UnixNano())
+	if err := c.send(protocol.StreamControl, protocol.MsgDiscoPeers, protocol.DiscoPeersPayload{
+		RequestID: requestID,
+	}); err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		return nil
+	}
 }
 
 // StartHeartbeat sends periodic PING messages to maintain session liveness.
@@ -205,7 +275,13 @@ func (c *ChatClient) SendPing() error {
 		},
 		Payload: payload,
 	}
-	raw, err := protocol.MarshalPacket(packet)
+	var raw []byte
+	if cipher := c.getCipher(); cipher != nil {
+		packet.Hdr.Flags |= protocol.FlagENC
+		raw, err = cipher.EncryptPacket(packet.Hdr, packet.Payload)
+	} else {
+		raw, err = protocol.MarshalPacket(packet)
+	}
 	if err != nil {
 		return err
 	}
@@ -313,7 +389,7 @@ func (c *ChatClient) handlePacket(packet *protocol.Packet) {
 		stream := c.getStream(packet.Hdr.StreamID)
 		_, fastRetransmit := stream.ProcessAck(packet.Hdr.AckNum, packet.Hdr.AckBitmap, packet.Hdr.WindowSize)
 		for _, segment := range fastRetransmit {
-			if _, err := c.conn.WriteToUDP(segment.Raw, c.server); err != nil {
+			if err := c.retransmitSegment(segment); err != nil {
 				fmt.Printf("\n[Transfer Warning] Fast retransmit failed: %v\n", err)
 			}
 		}
@@ -338,14 +414,31 @@ func (c *ChatClient) applyMessage(packet *protocol.Packet) {
 	case protocol.MsgMessBroadcast:
 		if message, err := protocol.DecodeJSONPayload[protocol.BroadcastMessageServerPayload](packet.Payload); err == nil {
 			c.store.AppendBroadcastMessage(message)
+			c.publish("chat.message_received", message)
 		}
 	case protocol.MsgMessUnicast:
 		if message, err := protocol.DecodeJSONPayload[protocol.UnicastMessageServerPayload](packet.Payload); err == nil {
 			c.store.AppendDirectMessage(message)
+			c.publish("chat.message_received", message)
 		}
 	case protocol.MsgMessDelivered:
 		if receipt, err := protocol.DecodeJSONPayload[protocol.MessageDeliveredPayload](packet.Payload); err == nil {
 			c.store.MarkDelivered(receipt.ClientMsgID)
+			c.publish("chat.delivery_status", map[string]any{
+				"client_msg_id": receipt.ClientMsgID,
+				"status":        receipt.Status,
+				"scope":         receipt.Scope,
+			})
+		}
+	case protocol.MsgDiscoUpdate:
+		if update, err := protocol.DecodeJSONPayload[protocol.DiscoUpdatePayload](packet.Payload); err == nil {
+			c.store.ApplyDiscoUpdate(update)
+			c.publish("presence.updated", update)
+		}
+	case protocol.MsgDiscoPeersResponse:
+		if response, err := protocol.DecodeJSONPayload[protocol.DiscoPeersResponsePayload](packet.Payload); err == nil {
+			c.store.ReplaceOnlinePeers(response.Peers)
+			c.publish("presence.updated", response)
 		}
 	case protocol.MsgFileInit:
 		c.handleFileInit(packet)
@@ -370,10 +463,38 @@ func (c *ChatClient) applyMessage(packet *protocol.Packet) {
 		}
 	case protocol.MsgError:
 		if message, err := protocol.DecodeJSONPayload[protocol.ErrorMessagePayload](packet.Payload); err == nil {
+			if message.RefID != "" {
+				c.store.MarkFailed(message.RefID, message.Code, message.Message)
+				c.publish("chat.delivery_status", map[string]any{
+					"client_msg_id": message.RefID,
+					"status":        "FAILED",
+					"error_code":    message.Code,
+					"error_message": message.Message,
+				})
+			}
 			c.mu.Lock()
 			c.lastError = message.Code + ": " + message.Message
 			c.mu.Unlock()
 			fmt.Printf("\n[Lỗi Hệ Thống] Mã: %s - %s\n", message.Code, message.Message)
+		}
+	}
+}
+
+func (c *ChatClient) publish(name string, data any) {
+	if c.eventBus != nil {
+		c.eventBus.Publish(name, data)
+	}
+}
+
+func (c *ChatClient) updateProgress(progress *transfer.TransferProgress) {
+	c.store.UpdateFileProgress(progress)
+	if progress != nil {
+		c.publish("file.progress", progress)
+		if progress.State == "COMPLETED" {
+			c.publish("file.completed", progress)
+		}
+		if progress.State == "ERROR" || progress.State == "FAILED" || progress.State == "CANCELLED" || progress.State == "REJECTED" {
+			c.publish("file.failed", progress)
 		}
 	}
 }
@@ -409,7 +530,7 @@ func (c *ChatClient) handleFileInit(packet *protocol.Packet) {
 		c.resetStream(packet.Hdr.StreamID)
 		c.transferMgr.RegisterDownloader(initPayload.TransferID, downloader)
 		c.setProgressBar(initPayload.TransferID, transfer.NewProgressBar("Download "+initPayload.FileName, initPayload.FileSize))
-		c.store.UpdateFileProgress(&transfer.TransferProgress{
+		c.updateProgress(&transfer.TransferProgress{
 			TransferID: initPayload.TransferID,
 			Direction:  "DOWNLOAD",
 			Peer:       initPayload.Sender,
@@ -432,7 +553,7 @@ func (c *ChatClient) handleFileResponse(packet *protocol.Packet) {
 		if uploader != nil {
 			_ = uploader.Close()
 		}
-		c.store.UpdateFileProgress(&transfer.TransferProgress{
+		c.updateProgress(&transfer.TransferProgress{
 			TransferID: response.TransferID,
 			Direction:  "UPLOAD",
 			State:      "REJECTED",
@@ -461,7 +582,7 @@ func (c *ChatClient) handleFileResponse(packet *protocol.Packet) {
 				select {
 				case <-ticker.C:
 					for _, segment := range stream.GetExpiredSegments(c.rto.RTO()) {
-						if _, writeErr := c.conn.WriteToUDP(segment.Raw, c.server); writeErr != nil {
+						if writeErr := c.retransmitSegment(segment); writeErr != nil {
 							return
 						}
 					}
@@ -472,7 +593,7 @@ func (c *ChatClient) handleFileResponse(packet *protocol.Packet) {
 		}()
 		defer func() {
 			if recovered := recover(); recovered != nil {
-				c.store.UpdateFileProgress(&transfer.TransferProgress{
+				c.updateProgress(&transfer.TransferProgress{
 					TransferID: response.TransferID,
 					State:      "ERROR",
 				})
@@ -512,7 +633,7 @@ func (c *ChatClient) handleFileResponse(packet *protocol.Packet) {
 					fmt.Printf("\r%s", line)
 				}
 			}
-			c.store.UpdateFileProgress(&transfer.TransferProgress{
+			c.updateProgress(&transfer.TransferProgress{
 				TransferID:       response.TransferID,
 				Direction:        "UPLOAD",
 				State:            "TRANSFERRING",
@@ -537,6 +658,27 @@ func (c *ChatClient) handleFileResponse(packet *protocol.Packet) {
 	}()
 }
 
+// retransmitSegment re-seals encrypted packets so each retry receives a fresh nonce.
+// Reusing the original AES-GCM bytes would intentionally trigger the anti-replay
+// window on the peer, even though the logical sequence number stays unchanged.
+func (c *ChatClient) retransmitSegment(segment *rudp.SentSegment) error {
+	if segment == nil {
+		return fmt.Errorf("chat client: nil retransmission segment")
+	}
+	raw := append([]byte(nil), segment.Raw...)
+	if cipher := c.getCipher(); cipher != nil && segment.Packet != nil {
+		var err error
+		raw, err = cipher.EncryptPacket(segment.Packet.Hdr, segment.Packet.Payload)
+		if err != nil {
+			return fmt.Errorf("chat client: re-seal retransmission: %w", err)
+		}
+	}
+	if _, err := c.conn.WriteToUDP(raw, c.server); err != nil {
+		return fmt.Errorf("chat client: retransmit packet: %w", err)
+	}
+	return nil
+}
+
 func (c *ChatClient) handleFileChunk(packet *protocol.Packet) {
 	chunk, err := protocol.UnmarshalFileChunk(packet.Payload)
 	if err != nil {
@@ -556,7 +698,7 @@ func (c *ChatClient) handleFileChunk(packet *protocol.Packet) {
 			fmt.Printf("\r%s", line)
 		}
 	}
-	c.store.UpdateFileProgress(&transfer.TransferProgress{
+	c.updateProgress(&transfer.TransferProgress{
 		TransferID:       id,
 		Direction:        "DOWNLOAD",
 		State:            "TRANSFERRING",
@@ -575,7 +717,7 @@ func (c *ChatClient) handleFileChunk(packet *protocol.Packet) {
 		})
 		c.transferMgr.Remove(id)
 		c.removeProgressBar(id)
-		c.store.UpdateFileProgress(&transfer.TransferProgress{
+		c.updateProgress(&transfer.TransferProgress{
 			TransferID:       id,
 			Direction:        "DOWNLOAD",
 			State:            "ERROR",
@@ -586,6 +728,7 @@ func (c *ChatClient) handleFileChunk(packet *protocol.Packet) {
 		return
 	}
 	bytesReceived := downloader.BytesWritten()
+	downloadPath := downloader.DownloadPath()
 	_ = c.send(packet.Hdr.StreamID, protocol.MsgFileComplete, protocol.FileCompletePayload{
 		TransferID:         id,
 		VerifiedSHA256:     checksum,
@@ -597,12 +740,13 @@ func (c *ChatClient) handleFileChunk(packet *protocol.Packet) {
 		fmt.Printf("\r%s\n", progressBar.Complete())
 	}
 	c.removeProgressBar(id)
-	c.store.UpdateFileProgress(&transfer.TransferProgress{
+	c.updateProgress(&transfer.TransferProgress{
 		TransferID:       id,
 		Direction:        "DOWNLOAD",
 		State:            "COMPLETED",
 		TransferredBytes: bytesReceived,
 		Percentage:       100,
+		LocalPath:        downloadPath,
 	})
 	fmt.Printf("\n[File Received Complete] Đã nhận đủ và xác thực SHA-256 thành công! File đã lưu vào thư mục: storage/downloads/\n")
 }
@@ -617,7 +761,7 @@ func (c *ChatClient) handleFileComplete(packet *protocol.Packet) {
 		_ = uploader.Close()
 	}
 	c.removeProgressBar(complete.TransferID)
-	c.store.UpdateFileProgress(&transfer.TransferProgress{
+	c.updateProgress(&transfer.TransferProgress{
 		TransferID: complete.TransferID,
 		State:      "COMPLETED",
 		Percentage: 100,
@@ -639,7 +783,7 @@ func (c *ChatClient) handleFileCancel(packet *protocol.Packet) {
 		_ = downloader.Cleanup()
 	}
 	c.removeProgressBar(cancel.TransferID)
-	c.store.UpdateFileProgress(&transfer.TransferProgress{
+	c.updateProgress(&transfer.TransferProgress{
 		TransferID: cancel.TransferID,
 		State:      "CANCELLED",
 	})

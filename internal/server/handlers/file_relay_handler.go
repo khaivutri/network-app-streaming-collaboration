@@ -102,7 +102,7 @@ func (h *FileRelayHandler) HandleFileChunk(_ *rudp.Session, _ uint8, payload []b
 		return nil
 	}
 	seq := chunk.ChunkIndex + 1
-	raw, err := protocol.MarshalPacket(&protocol.Packet{
+	packet := &protocol.Packet{
 		Hdr: protocol.Header{
 			Version:      protocol.ProtocolVersion,
 			Flags:        protocol.FlagREL | protocol.FlagORD | protocol.FlagACK,
@@ -113,7 +113,14 @@ func (h *FileRelayHandler) HandleFileChunk(_ *rudp.Session, _ uint8, payload []b
 			WindowSize:   protocol.DefaultWindowSize,
 		},
 		Payload: payload,
-	})
+	}
+	var raw []byte
+	if receiver.Cipher != nil {
+		packet.Hdr.Flags |= protocol.FlagENC
+		raw, err = receiver.Cipher.EncryptPacket(packet.Hdr, packet.Payload)
+	} else {
+		raw, err = protocol.MarshalPacket(packet)
+	}
 	if err != nil {
 		return fmt.Errorf("file relay: marshal chunk: %w", err)
 	}
