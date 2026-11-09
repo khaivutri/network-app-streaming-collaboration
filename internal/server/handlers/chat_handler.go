@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/khaivutri/network-app-streaming-collaboration/internal/server/state"
+	security "github.com/khaivutri/network-app-streaming-collaboration/pkg/crypto"
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/protocol"
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/transport/rudp"
 )
@@ -54,7 +55,7 @@ func (h *ChatHandler) HandleBroadcast(sess *rudp.Session, _ uint8, payload []byt
 		if !found || target.OutboundCh == nil {
 			continue
 		}
-		raw, marshalErr := chatPacket(protocol.StreamBroadcastChat, protocol.MsgMessBroadcast, target.ConnectionID, encoded)
+		raw, marshalErr := chatPacket(protocol.StreamBroadcastChat, protocol.MsgMessBroadcast, target.ConnectionID, target.Cipher, encoded)
 		if marshalErr != nil {
 			return marshalErr
 		}
@@ -111,7 +112,7 @@ func (h *ChatHandler) HandleUnicast(sess *rudp.Session, _ uint8, payload []byte)
 	if err != nil {
 		return fmt.Errorf("chat: encode unicast: %w", err)
 	}
-	raw, err := chatPacket(protocol.StreamDirectChat, protocol.MsgMessUnicast, recipient.ConnectionID, encoded)
+	raw, err := chatPacket(protocol.StreamDirectChat, protocol.MsgMessUnicast, recipient.ConnectionID, recipient.Cipher, encoded)
 	if err != nil {
 		return err
 	}
@@ -150,18 +151,22 @@ func (h *ChatHandler) sendReliableJSON(sess *rudp.Session, streamID, msgType uin
 	return sess.SendReliable(streamID, msgType, encoded)
 }
 
-func chatPacket(streamID, msgType uint8, connectionID uint32, payload []byte) ([]byte, error) {
-	raw, err := protocol.MarshalPacket(&protocol.Packet{
-		Hdr: protocol.Header{
-			Version:      protocol.ProtocolVersion,
-			Flags:        protocol.FlagREL | protocol.FlagORD,
-			MsgType:      msgType,
-			StreamID:     streamID,
-			ConnectionID: connectionID,
-			WindowSize:   protocol.DefaultWindowSize,
-		},
-		Payload: payload,
-	})
+func chatPacket(streamID, msgType uint8, connectionID uint32, cipher *security.SessionCipher, payload []byte) ([]byte, error) {
+	hdr := protocol.Header{
+		Version:      protocol.ProtocolVersion,
+		Flags:        protocol.FlagREL | protocol.FlagORD,
+		MsgType:      msgType,
+		StreamID:     streamID,
+		ConnectionID: connectionID,
+		WindowSize:   protocol.DefaultWindowSize,
+	}
+	var raw []byte
+	var err error
+	if cipher != nil {
+		raw, err = cipher.EncryptPacket(hdr, payload)
+	} else {
+		raw, err = protocol.MarshalPacket(&protocol.Packet{Hdr: hdr, Payload: payload})
+	}
 	if err != nil {
 		return nil, fmt.Errorf("chat: marshal routed packet: %w", err)
 	}

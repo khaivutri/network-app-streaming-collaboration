@@ -2,6 +2,7 @@ package state
 
 import (
 	"errors"
+	security "github.com/khaivutri/network-app-streaming-collaboration/pkg/crypto"
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/protocol"
 	"net"
 	"sync"
@@ -36,6 +37,7 @@ type UserSession struct {
 	LastHeartbeatAt time.Time
 	MissedPings     int
 	OutboundCh      chan []byte
+	Cipher          *security.SessionCipher
 }
 
 // sessionPeer converts internal state into a detached wire DTO.
@@ -53,6 +55,15 @@ func sessionPeer(session *UserSession, status string) protocol.PeerDTO {
 // RegisterAuthenticatedUser atomically checks BR02 and records both indexes.
 // Returned channels are snapshots; socket I/O must happen after unlocking.
 func RegisterAuthenticatedUser(username, displayName string, connID uint32, remoteAddr *net.UDPAddr, sessionKey [32]byte, outboundCh chan []byte) (allPeers []protocol.PeerDTO, otherTargets []chan []byte, err error) {
+	return registerAuthenticatedUser(username, displayName, connID, remoteAddr, sessionKey, outboundCh, nil)
+}
+
+// RegisterAuthenticatedUserWithCipher records a user and its hop encryption context.
+func RegisterAuthenticatedUserWithCipher(username, displayName string, connID uint32, remoteAddr *net.UDPAddr, sessionKey [32]byte, outboundCh chan []byte, cipher *security.SessionCipher) (allPeers []protocol.PeerDTO, otherTargets []chan []byte, err error) {
+	return registerAuthenticatedUser(username, displayName, connID, remoteAddr, sessionKey, outboundCh, cipher)
+}
+
+func registerAuthenticatedUser(username, displayName string, connID uint32, remoteAddr *net.UDPAddr, sessionKey [32]byte, outboundCh chan []byte, cipher *security.SessionCipher) (allPeers []protocol.PeerDTO, otherTargets []chan []byte, err error) {
 	GlobalUsersMu.Lock()
 	defer GlobalUsersMu.Unlock()
 	if _, exists := GlobalOnlineUsers[username]; exists {
@@ -74,6 +85,7 @@ func RegisterAuthenticatedUser(username, displayName string, connID uint32, remo
 		LoginAt:         now,
 		LastHeartbeatAt: now,
 		OutboundCh:      outboundCh,
+		Cipher:          cipher,
 	}
 	GlobalOnlineUsers[username] = session
 	GlobalConnIndex[connID] = username
@@ -149,6 +161,21 @@ func LookupUsernameByConnID(connID uint32) (string, bool) {
 	defer GlobalUsersMu.RUnlock()
 	username, ok := GlobalConnIndex[connID]
 	return username, ok
+}
+
+// LookupTargetByConnID returns the session snapshot associated with a connection.
+func LookupTargetByConnID(connID uint32) (UserSession, bool) {
+	GlobalUsersMu.RLock()
+	defer GlobalUsersMu.RUnlock()
+	username, ok := GlobalConnIndex[connID]
+	if !ok {
+		return UserSession{}, false
+	}
+	session, ok := GlobalOnlineUsers[username]
+	if !ok {
+		return UserSession{}, false
+	}
+	return *session, true
 }
 
 // TouchHeartbeat updates liveness while preserving both map invariants.

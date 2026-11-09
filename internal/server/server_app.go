@@ -77,7 +77,7 @@ func (app *ServerApp) handleAuth(sess *rudp.Session, _ uint8, payload []byte) er
 		})
 	}
 	addr := sess.RemoteAddr()
-	peers, targets, err := state.RegisterAuthenticatedUser(user.Username, user.DisplayName, sess.ID(), addr, [32]byte{}, sess.OutboundQueue())
+	peers, targets, err := state.RegisterAuthenticatedUserWithCipher(user.Username, user.DisplayName, sess.ID(), addr, [32]byte{}, sess.OutboundQueue(), sess.Cipher())
 	if err != nil {
 		return app.sendJSON(sess, protocol.MsgAuthResponse, protocol.AuthResponsePayload{
 			RequestID:  req.RequestID,
@@ -230,17 +230,20 @@ func (app *ServerApp) sendJSON(sess *rudp.Session, msgType uint8, value any) err
 	if msgType == protocol.MsgPong {
 		flags = protocol.FlagACK
 	}
-	raw, err := protocol.MarshalPacket(&protocol.Packet{
-		Hdr: protocol.Header{
-			Version:      protocol.ProtocolVersion,
-			Flags:        flags,
-			MsgType:      msgType,
-			StreamID:     protocol.StreamControl,
-			ConnectionID: sess.ID(),
-			WindowSize:   protocol.DefaultWindowSize,
-		},
-		Payload: payload,
-	})
+	hdr := protocol.Header{
+		Version:      protocol.ProtocolVersion,
+		Flags:        flags,
+		MsgType:      msgType,
+		StreamID:     protocol.StreamControl,
+		ConnectionID: sess.ID(),
+		WindowSize:   protocol.DefaultWindowSize,
+	}
+	var raw []byte
+	if cipher := sess.Cipher(); cipher != nil {
+		raw, err = cipher.EncryptPacket(hdr, payload)
+	} else {
+		raw, err = protocol.MarshalPacket(&protocol.Packet{Hdr: hdr, Payload: payload})
+	}
 	if err != nil {
 		return fmt.Errorf("server marshal response: %w", err)
 	}

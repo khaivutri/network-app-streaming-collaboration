@@ -220,17 +220,21 @@ func (h *FileRelayHandler) sendJSON(sess *rudp.Session, streamID, msgType uint8,
 
 // Forward queues a file-control packet for a peer session.
 func (h *FileRelayHandler) Forward(queue chan []byte, connID uint32, streamID, msgType uint8, payload []byte) error {
-	raw, err := protocol.MarshalPacket(&protocol.Packet{
-		Hdr: protocol.Header{
-			Version:      protocol.ProtocolVersion,
-			Flags:        protocol.FlagREL | protocol.FlagORD,
-			MsgType:      msgType,
-			StreamID:     streamID,
-			ConnectionID: connID,
-			WindowSize:   protocol.DefaultWindowSize,
-		},
-		Payload: payload,
-	})
+	hdr := protocol.Header{
+		Version:      protocol.ProtocolVersion,
+		Flags:        protocol.FlagREL | protocol.FlagORD,
+		MsgType:      msgType,
+		StreamID:     streamID,
+		ConnectionID: connID,
+		WindowSize:   protocol.DefaultWindowSize,
+	}
+	var raw []byte
+	var err error
+	if target, ok := state.LookupTargetByConnID(connID); ok && target.Cipher != nil {
+		raw, err = target.Cipher.EncryptPacket(hdr, payload)
+	} else {
+		raw, err = protocol.MarshalPacket(&protocol.Packet{Hdr: hdr, Payload: payload})
+	}
 	if err != nil {
 		return fmt.Errorf("file relay: marshal forward: %w", err)
 	}
