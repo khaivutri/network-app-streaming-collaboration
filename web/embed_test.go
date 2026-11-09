@@ -15,11 +15,22 @@ func TestEmbeddedUIContainsRequiredLocalAssets(t *testing.T) {
 		"index.html",
 		"css/design-system.css",
 		"js/main.js",
+		"js/store.js",
 		"js/api-client.js",
 		"js/sse-listener.js",
+		"js/components/file-card.js",
 		"js/views/login-view.js",
 		"js/views/workspace-view.js",
 		"js/views/direct-chat-view.js",
+	}
+	css, err := fs.ReadFile(staticFS, "css/design-system.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, token := range []string{"#4a154b", "#f4ede4", "#f9f0ff", "#e6e6e6", ".connection-banner", ".file-failed", ".bootstrap-error"} {
+		if !strings.Contains(string(css), token) {
+			t.Errorf("design stylesheet is missing required token/state %q", token)
+		}
 	}
 	for _, path := range required {
 		if _, err := fs.ReadFile(staticFS, path); err != nil {
