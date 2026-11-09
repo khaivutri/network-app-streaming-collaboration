@@ -1,6 +1,7 @@
 package state
 
 import (
+	"github.com/khaivutri/network-app-streaming-collaboration/internal/client/transfer"
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/protocol"
 	"testing"
 )
@@ -16,8 +17,10 @@ func TestClientStoreSessionAndPresence(t *testing.T) {
 	if len(store.GetOnlinePeers()) != 1 {
 		t.Fatal("leave state not recorded")
 	}
+	store.AppendBroadcastMessage(protocol.BroadcastMessageServerPayload{ClientMsgID: "msg-1", Sender: "Alice"})
+	store.UpdateFileProgress(&transfer.TransferProgress{TransferID: "file-1", State: "COMPLETED", LocalPath: "download.bin"})
 	store.ClearSession()
-	if store.IsLoggedIn() || len(store.GetOnlinePeers()) != 0 {
+	if store.IsLoggedIn() || len(store.GetOnlinePeers()) != 0 || len(store.GetBroadcastMessages()) != 0 || len(store.GetFileProgresses()) != 0 {
 		t.Fatal("session was not cleared")
 	}
 }

@@ -192,6 +192,13 @@ func (d *Downloader) BytesWritten() int64 {
 	return d.bytesWritten
 }
 
+// DownloadPath returns the verified destination path owned by this downloader.
+func (d *Downloader) DownloadPath() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.downloadPath
+}
+
 func minFloat(a, b float64) float64 {
 	if a < b {
 		return a

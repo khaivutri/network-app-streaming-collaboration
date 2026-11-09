@@ -12,6 +12,7 @@ type TransferProgress struct {
 	TransferredBytes int64   `json:"transferred_bytes"`
 	Percentage       float64 `json:"percentage"`
 	State            string  `json:"state"`
+	LocalPath        string  `json:"-"`
 }
 
 // Manager owns active uploaders, downloaders, and progress snapshots.
