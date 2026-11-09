@@ -28,7 +28,7 @@ export function renderFileCard(file, { onCancel, onRetry, outgoing = file.direct
     progress.setAttribute("aria-label", `Đang truyền tệp: ${percentage}%`);
     const progressLabel = document.createElement("div");
     progressLabel.className = "file-progress-label";
-    progressLabel.textContent = `${percentage}% · ${formatBytes(Number(file.transferred_bytes || 0))}`;
+    progressLabel.textContent = `${percentage.toFixed(1)}% · ${formatBytes(Number(file.transferred_bytes || 0))} / ${formatBytes(Number(file.file_size || 0))}`;
     card.append(progress, progressLabel);
   }
 

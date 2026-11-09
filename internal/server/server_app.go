@@ -77,7 +77,7 @@ func (app *ServerApp) handleAuth(sess *rudp.Session, _ uint8, payload []byte) er
 		})
 	}
 	addr := sess.RemoteAddr()
-	peers, targets, err := state.RegisterAuthenticatedUserWithCipher(user.Username, user.DisplayName, sess.ID(), addr, [32]byte{}, sess.OutboundQueue(), sess.Cipher())
+	peers, targets, err := state.RegisterReliableUser(user.Username, user.DisplayName, sess)
 	if err != nil {
 		return app.sendJSON(sess, protocol.MsgAuthResponse, protocol.AuthResponsePayload{
 			RequestID:  req.RequestID,

@@ -40,7 +40,7 @@ export function renderWorkspace(root, snapshot, { onOpenPeer, onChanged, onRefre
   commonChat.textContent = "Trò chuyện chung";
   sidebar.append(commonChat);
   const main = document.createElement("section");
-  main.className = "chat-panel workspace-main";
+  main.className = "workspace-main chat-panel";
   const header = document.createElement("header");
   header.className = "chat-header";
   const title = document.createElement("h1");
@@ -65,7 +65,7 @@ export function renderWorkspace(root, snapshot, { onOpenPeer, onChanged, onRefre
   messages.className = "message-list";
   if (!snapshot.broadcast_messages.length) messages.append(emptyState());
   snapshot.broadcast_messages.forEach((message) => messages.append(messageBubble(message, message.sender === snapshot.current_user?.username, snapshot.delivery_status[message.client_msg_id])));
-  snapshot.file_transfers.filter((file) => file.direction !== "DOWNLOAD" || file.peer === "").forEach((file) => messages.append(renderFileCard(file, {
+  snapshot.file_transfers.filter((file) => file.peer === "").forEach((file) => messages.append(renderFileCard(file, {
     outgoing: file.direction === "UPLOAD",
     onCancel: async (id) => { await API.cancelFile(id); await onRefresh(); },
     onRetry: async (id) => { await API.retryFile(id); await onRefresh(); },
@@ -77,18 +77,31 @@ export function renderWorkspace(root, snapshot, { onOpenPeer, onChanged, onRefre
   input.placeholder = "Viết tin nhắn...";
   input.value = uiState.broadcastDraft;
   input.addEventListener("input", () => { uiState.broadcastDraft = input.value; });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); form.requestSubmit(); }
+  });
+  input.setAttribute("aria-label", "Tin nhắn. Enter để gửi, Shift+Enter để xuống dòng");
   const send = document.createElement("button");
   send.className = "button-primary";
   send.textContent = "Gửi";
+  send.type = "submit";
   form.append(input, send);
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const content = input.value.trim();
     if (!content) return;
     const id = crypto.randomUUID();
-    try { await API.broadcast(id, content); input.value = ""; uiState.broadcastDraft = ""; } catch (error) { showToast(error.message, "error"); }
+    input.value = "";
+    uiState.broadcastDraft = "";
+    send.disabled = true;
+    try { await API.broadcast(id, content); }
+    catch (error) { input.value = content; uiState.broadcastDraft = content; showToast(error.message, "error"); }
+    finally { send.disabled = false; input.focus(); }
   });
-  main.append(header, messages, form);
+  const hint = document.createElement("p");
+  hint.className = "composer-hint";
+  hint.textContent = "Enter để gửi · Shift+Enter để xuống dòng";
+  main.append(header, messages, form, hint);
   layout.append(topbar, sidebar, main);
   root.append(layout);
 }

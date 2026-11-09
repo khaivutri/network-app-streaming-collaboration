@@ -9,6 +9,7 @@ type BroadcastMessageClientPayload struct {
 
 // BroadcastMessageServerPayload is a room message authenticated and fanned out by the server.
 type BroadcastMessageServerPayload struct {
+	Scope         string `json:"scope"`
 	MsgID         string `json:"msg_id"`
 	ClientMsgID   string `json:"client_msg_id"`
 	Sender        string `json:"sender"`
@@ -27,6 +28,7 @@ type UnicastMessageClientPayload struct {
 
 // UnicastMessageServerPayload is a direct message addressed to one recipient.
 type UnicastMessageServerPayload struct {
+	Scope         string `json:"scope"`
 	MsgID         string `json:"msg_id"`
 	ClientMsgID   string `json:"client_msg_id"`
 	Sender        string `json:"sender"`

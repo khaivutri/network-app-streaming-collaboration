@@ -11,6 +11,7 @@ const browserStore = createStore();
 let stopEvents = null;
 let selectedPeer = null;
 let unsubscribeRender = null;
+let transferSyncTimer = null;
 const uiState = { broadcastDraft: "", directDrafts: new Map(), selectedFiles: new Map() };
 
 function renderUI(snapshot) {
@@ -22,6 +23,8 @@ function renderUI(snapshot) {
       onBack: () => { selectedPeer = null; renderUI(browserStore.snapshot()); },
       onChanged: bootstrap,
       onOpenPeer: (peer) => { selectedPeer = peer; renderUI(browserStore.snapshot()); },
+      onFileTransfer: (transfer) => browserStore.upsertFileTransfer(transfer),
+      onOptimisticMessage: (scope, peer, message) => browserStore.addOptimisticMessage(scope, peer, message),
       uiState,
     });
   } else {
@@ -29,6 +32,8 @@ function renderUI(snapshot) {
       onOpenPeer: (peer) => { selectedPeer = peer; renderUI(browserStore.snapshot()); },
       onChanged: renderUI,
       onRefresh: bootstrap,
+      onFileTransfer: (transfer) => browserStore.upsertFileTransfer(transfer),
+      onOptimisticMessage: (scope, peer, message) => browserStore.addOptimisticMessage(scope, peer, message),
       uiState,
     });
   }
@@ -39,6 +44,12 @@ async function bootstrap() {
     const session = await API.getSession();
     browserStore.replaceSession(session);
     if (!unsubscribeRender) unsubscribeRender = browserStore.subscribe(renderUI);
+    if (!transferSyncTimer) transferSyncTimer = setInterval(async () => {
+      const current = browserStore.snapshot();
+      if (!current.authenticated || !current.file_transfers.some((file) => ["INIT", "TRANSFERRING"].includes(file.state))) return;
+      try { browserStore.replaceSession(await API.getSession()); }
+      catch (error) { console.error("Transfer resync failed", error); }
+    }, 2000);
     if (stopEvents) {
       stopEvents();
       stopEvents = null;

@@ -4,6 +4,7 @@ import (
 	"errors"
 	security "github.com/khaivutri/network-app-streaming-collaboration/pkg/crypto"
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/protocol"
+	"github.com/khaivutri/network-app-streaming-collaboration/pkg/transport/rudp"
 	"net"
 	"sync"
 	"time"
@@ -38,6 +39,7 @@ type UserSession struct {
 	MissedPings     int
 	OutboundCh      chan []byte
 	Cipher          *security.SessionCipher
+	ReliableSession *rudp.Session
 }
 
 // sessionPeer converts internal state into a detached wire DTO.
@@ -61,6 +63,18 @@ func RegisterAuthenticatedUser(username, displayName string, connID uint32, remo
 // RegisterAuthenticatedUserWithCipher records a user and its hop encryption context.
 func RegisterAuthenticatedUserWithCipher(username, displayName string, connID uint32, remoteAddr *net.UDPAddr, sessionKey [32]byte, outboundCh chan []byte, cipher *security.SessionCipher) (allPeers []protocol.PeerDTO, otherTargets []chan []byte, err error) {
 	return registerAuthenticatedUser(username, displayName, connID, remoteAddr, sessionKey, outboundCh, cipher)
+}
+
+func RegisterReliableUser(username, displayName string, sess *rudp.Session) ([]protocol.PeerDTO, []chan []byte, error) {
+	peers, targets, err := RegisterAuthenticatedUserWithCipher(username, displayName, sess.ID(), sess.RemoteAddr(), [32]byte{}, sess.OutboundQueue(), sess.Cipher())
+	if err == nil {
+		GlobalUsersMu.Lock()
+		if user := GlobalOnlineUsers[username]; user != nil {
+			user.ReliableSession = sess
+		}
+		GlobalUsersMu.Unlock()
+	}
+	return peers, targets, err
 }
 
 func registerAuthenticatedUser(username, displayName string, connID uint32, remoteAddr *net.UDPAddr, sessionKey [32]byte, outboundCh chan []byte, cipher *security.SessionCipher) (allPeers []protocol.PeerDTO, otherTargets []chan []byte, err error) {

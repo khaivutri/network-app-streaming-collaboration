@@ -322,6 +322,15 @@ func mergeTransferProgress(previous, next transfer.TransferProgress) transfer.Tr
 	if next.State != "" {
 		previous.State = next.State
 	}
+	if next.CreatedAt != 0 && previous.CreatedAt == 0 {
+		previous.CreatedAt = next.CreatedAt
+	}
+	if next.UpdatedAt != 0 {
+		previous.UpdatedAt = next.UpdatedAt
+	}
+	if next.ErrorMessage != "" {
+		previous.ErrorMessage = next.ErrorMessage
+	}
 	if next.LocalPath != "" {
 		previous.LocalPath = next.LocalPath
 	}

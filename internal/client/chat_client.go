@@ -20,23 +20,24 @@ import (
 
 // ChatClient sends and receives Step 5 messages on one authenticated UDP socket.
 type ChatClient struct {
-	conn             *net.UDPConn
-	server           *net.UDPAddr
-	connID           uint32
-	store            *state.ClientStore
-	mu               sync.Mutex
-	streams          map[uint8]*rudp.Stream
-	streamPool       *rudp.StreamPool
-	transferMgr      *transfer.Manager
-	transferStreams  map[string]uint8
-	progressBars     map[string]*transfer.ProgressBar
-	pingSeq          atomic.Uint32
-	lastServerActive time.Time
-	rto              *rudp.AdaptiveRTO
-	lastError        string
-	cipherMu         sync.RWMutex
-	cipher           *security.SessionCipher
-	eventBus         *events.Bus
+	conn              *net.UDPConn
+	server            *net.UDPAddr
+	connID            uint32
+	store             *state.ClientStore
+	mu                sync.Mutex
+	streams           map[uint8]*rudp.Stream
+	streamPool        *rudp.StreamPool
+	transferMgr       *transfer.Manager
+	transferStreams   map[string]uint8
+	progressBars      map[string]*transfer.ProgressBar
+	pingSeq           atomic.Uint32
+	lastServerActive  time.Time
+	rto               *rudp.AdaptiveRTO
+	lastError         string
+	cipherMu          sync.RWMutex
+	cipher            *security.SessionCipher
+	eventBus          *events.Bus
+	progressPublished map[string]time.Time
 }
 
 // SetCipher enables directional encryption for chat and file traffic.
@@ -53,6 +54,7 @@ func (c *ChatClient) getCipher() *security.SessionCipher {
 }
 
 const clientSocketBufferSize = 4 * 1024 * 1024
+const fileAcceptanceTimeout = 10 * time.Second
 
 // NewChatClient creates a chat facade over an existing authenticated socket.
 func NewChatClient(conn *net.UDPConn, server *net.UDPAddr, connectionID uint32, store *state.ClientStore) *ChatClient {
@@ -66,17 +68,18 @@ func NewChatClientWithStorage(conn *net.UDPConn, server *net.UDPAddr, connection
 		_ = conn.SetWriteBuffer(clientSocketBufferSize)
 	}
 	return &ChatClient{
-		conn:             conn,
-		server:           server,
-		connID:           connectionID,
-		store:            store,
-		streams:          make(map[uint8]*rudp.Stream),
-		streamPool:       rudp.NewStreamPool(),
-		transferMgr:      transfer.NewManager(stagingDir, downloadDir),
-		transferStreams:  make(map[string]uint8),
-		progressBars:     make(map[string]*transfer.ProgressBar),
-		rto:              rudp.NewAdaptiveRTO(rudp.DefaultRTOConfig()),
-		lastServerActive: time.Now(),
+		conn:              conn,
+		server:            server,
+		connID:            connectionID,
+		store:             store,
+		streams:           make(map[uint8]*rudp.Stream),
+		streamPool:        rudp.NewStreamPool(),
+		transferMgr:       transfer.NewManager(stagingDir, downloadDir),
+		transferStreams:   make(map[string]uint8),
+		progressBars:      make(map[string]*transfer.ProgressBar),
+		progressPublished: make(map[string]time.Time),
+		rto:               rudp.NewAdaptiveRTO(rudp.DefaultRTOConfig()),
+		lastServerActive:  time.Now(),
 	}
 }
 
@@ -111,6 +114,8 @@ func (c *ChatClient) SendFileNamed(recipient, filePath, displayName, caption str
 	c.transferMgr.RegisterUploader(id, uploader)
 	c.updateProgress(&transfer.TransferProgress{
 		TransferID: id,
+		CreatedAt:  time.Now().UnixMilli(),
+		UpdatedAt:  time.Now().UnixMilli(),
 		Direction:  "UPLOAD",
 		Peer:       recipient,
 		FileName:   initPayload.FileName,
@@ -126,7 +131,33 @@ func (c *ChatClient) SendFileNamed(recipient, filePath, displayName, caption str
 	c.mu.Lock()
 	c.transferStreams[id] = streamID
 	c.mu.Unlock()
+	go c.watchFileAcceptance(id, streamID)
 	return id, nil
+}
+
+func (c *ChatClient) watchFileAcceptance(id string, streamID uint8) {
+	timer := time.NewTimer(fileAcceptanceTimeout)
+	defer timer.Stop()
+	<-timer.C
+	progress, ok := c.store.GetFileProgress(id)
+	if !ok || progress == nil || progress.State != "INIT" {
+		return
+	}
+	_ = c.send(streamID, protocol.MsgFileCancel, protocol.FileCancelPayload{TransferID: id, Reason: protocol.FileCodeUserCancelled, Message: "file acceptance timeout", Timestamp: time.Now().UnixMilli()})
+	c.failTransfer(id, "Không nhận được phản hồi từ người nhận")
+}
+
+func (c *ChatClient) failTransfer(id, message string) {
+	uploader, downloader := c.transferMgr.Remove(id)
+	if uploader != nil {
+		_ = uploader.Close()
+	}
+	if downloader != nil {
+		_ = downloader.Cleanup()
+	}
+	c.removeProgressBar(id)
+	c.updateProgress(&transfer.TransferProgress{TransferID: id, UpdatedAt: time.Now().UnixMilli(), State: "FAILED", ErrorMessage: message})
+	c.releaseTransferStream(id)
 }
 
 // CancelTransfer stops a transfer and removes any partial local file.
@@ -488,15 +519,36 @@ func (c *ChatClient) publish(name string, data any) {
 
 func (c *ChatClient) updateProgress(progress *transfer.TransferProgress) {
 	c.store.UpdateFileProgress(progress)
-	if progress != nil {
-		c.publish("file.progress", progress)
-		if progress.State == "COMPLETED" {
-			c.publish("file.completed", progress)
-		}
-		if progress.State == "ERROR" || progress.State == "FAILED" || progress.State == "CANCELLED" || progress.State == "REJECTED" {
-			c.publish("file.failed", progress)
-		}
+	if progress == nil {
+		return
 	}
+	terminal := progress.State == "COMPLETED" || progress.State == "ERROR" || progress.State == "FAILED" || progress.State == "CANCELLED" || progress.State == "REJECTED"
+	c.mu.Lock()
+	last := c.progressPublished[progress.TransferID]
+	shouldPublish := progress.State != "TRANSFERRING" || time.Since(last) >= 100*time.Millisecond
+	if shouldPublish {
+		c.progressPublished[progress.TransferID] = time.Now()
+	}
+	if terminal {
+		delete(c.progressPublished, progress.TransferID)
+	}
+	c.mu.Unlock()
+	if !shouldPublish {
+		return
+	}
+	// Publish the merged store snapshot so each event carries complete metadata.
+	current, ok := c.store.GetFileProgress(progress.TransferID)
+	if !ok {
+		return
+	}
+	name := "file.progress"
+	if current.State == "COMPLETED" {
+		name = "file.completed"
+	}
+	if terminal && current.State != "COMPLETED" {
+		name = "file.failed"
+	}
+	c.publish(name, current)
 }
 
 // LastServerActive returns the last accepted PONG timestamp.
@@ -532,6 +584,8 @@ func (c *ChatClient) handleFileInit(packet *protocol.Packet) {
 		c.setProgressBar(initPayload.TransferID, transfer.NewProgressBar("Download "+initPayload.FileName, initPayload.FileSize))
 		c.updateProgress(&transfer.TransferProgress{
 			TransferID: initPayload.TransferID,
+			CreatedAt:  initPayload.CreatedAt,
+			UpdatedAt:  time.Now().UnixMilli(),
 			Direction:  "DOWNLOAD",
 			Peer:       initPayload.Sender,
 			FileName:   initPayload.FileName,
@@ -540,7 +594,10 @@ func (c *ChatClient) handleFileInit(packet *protocol.Packet) {
 		})
 		fmt.Printf("[File Accepted] Đã chấp nhận và sẵn sàng nhận các chunk...\n")
 	}
-	_ = c.send(packet.Hdr.StreamID, protocol.MsgFileResponse, response)
+	if sendErr := c.send(packet.Hdr.StreamID, protocol.MsgFileResponse, response); sendErr != nil {
+		fmt.Printf("[File Error] Không thể gửi phản hồi chấp nhận transfer_id=%s stream=%d: %v\n", initPayload.TransferID, packet.Hdr.StreamID, sendErr)
+		c.failTransfer(initPayload.TransferID, "Không thể phản hồi người gửi")
+	}
 }
 
 func (c *ChatClient) handleFileResponse(packet *protocol.Packet) {
@@ -563,11 +620,13 @@ func (c *ChatClient) handleFileResponse(packet *protocol.Packet) {
 		fmt.Printf("\n[File Transfer Failed] Người nhận từ chối hoặc ngoại tuyến: %s (code=%s)\n", response.Message, response.Code)
 		return
 	}
-	fmt.Printf("\n[File Transfer] Người nhận đã chấp nhận! Đang truyền các khối dữ liệu (chunks)...\n")
 	uploader, ok := c.transferMgr.Uploader(response.TransferID)
 	if !ok {
+		fmt.Printf("\n[File Transfer] Bỏ qua phản hồi đến muộn cho transfer_id=%s\n", response.TransferID)
 		return
 	}
+	fmt.Printf("\n[File Transfer] Người nhận đã chấp nhận! Đang truyền các khối dữ liệu (chunks)...\n")
+	c.updateProgress(&transfer.TransferProgress{TransferID: response.TransferID, UpdatedAt: time.Now().UnixMilli(), State: "TRANSFERRING"})
 	stream := c.resetStream(packet.Hdr.StreamID)
 	go func() {
 		progressBar := c.getProgressBar(response.TransferID)
@@ -585,6 +644,10 @@ func (c *ChatClient) handleFileResponse(packet *protocol.Packet) {
 						if writeErr := c.retransmitSegment(segment); writeErr != nil {
 							return
 						}
+					}
+					if stream.HasDeadSegments(rudp.MaxSegmentRetries) {
+						c.failTransfer(response.TransferID, "Mất kết nối với người nhận")
+						return
 					}
 				case <-done:
 					return
@@ -784,8 +847,10 @@ func (c *ChatClient) handleFileCancel(packet *protocol.Packet) {
 	}
 	c.removeProgressBar(cancel.TransferID)
 	c.updateProgress(&transfer.TransferProgress{
-		TransferID: cancel.TransferID,
-		State:      "CANCELLED",
+		TransferID:   cancel.TransferID,
+		UpdatedAt:    time.Now().UnixMilli(),
+		State:        map[bool]string{true: "FAILED", false: "CANCELLED"}[cancel.Reason == protocol.FileCodePeerDisconnected],
+		ErrorMessage: map[bool]string{true: "Người nhận đã ngắt kết nối", false: cancel.Message}[cancel.Reason == protocol.FileCodePeerDisconnected],
 	})
 	c.releaseTransferStream(cancel.TransferID)
 	fmt.Printf("\n[File Transfer Cancelled] Quá trình truyền file bị hủy: %s\n", cancel.Reason)

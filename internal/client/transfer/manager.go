@@ -4,6 +4,8 @@ import "sync"
 
 // TransferProgress is a thread-safe-store-friendly progress snapshot.
 type TransferProgress struct {
+	CreatedAt        int64   `json:"created_at"`
+	UpdatedAt        int64   `json:"updated_at"`
 	TransferID       string  `json:"transfer_id"`
 	Direction        string  `json:"direction"`
 	Peer             string  `json:"peer"`
@@ -12,6 +14,7 @@ type TransferProgress struct {
 	TransferredBytes int64   `json:"transferred_bytes"`
 	Percentage       float64 `json:"percentage"`
 	State            string  `json:"state"`
+	ErrorMessage     string  `json:"error_message,omitempty"`
 	LocalPath        string  `json:"-"`
 }
 

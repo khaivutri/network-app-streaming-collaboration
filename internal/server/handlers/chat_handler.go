@@ -38,6 +38,7 @@ func (h *ChatHandler) HandleBroadcast(sess *rudp.Session, _ uint8, payload []byt
 	now := time.Now().UnixMilli()
 	msgID := fmt.Sprintf("srv-bcast-%05d", h.msgCounter.Add(1))
 	message := protocol.BroadcastMessageServerPayload{
+		Scope:         "BROADCAST",
 		MsgID:         msgID,
 		ClientMsgID:   request.ClientMsgID,
 		Sender:        sender,
@@ -100,6 +101,7 @@ func (h *ChatHandler) HandleUnicast(sess *rudp.Session, _ uint8, payload []byte)
 	now := time.Now().UnixMilli()
 	msgID := fmt.Sprintf("srv-dm-%05d", h.msgCounter.Add(1))
 	message := protocol.UnicastMessageServerPayload{
+		Scope:         "UNICAST",
 		MsgID:         msgID,
 		ClientMsgID:   request.ClientMsgID,
 		Sender:        sender,
@@ -112,14 +114,17 @@ func (h *ChatHandler) HandleUnicast(sess *rudp.Session, _ uint8, payload []byte)
 	if err != nil {
 		return fmt.Errorf("chat: encode unicast: %w", err)
 	}
-	raw, err := chatPacket(protocol.StreamDirectChat, protocol.MsgMessUnicast, recipient.ConnectionID, recipient.Cipher, encoded)
-	if err != nil {
+	if recipient.ReliableSession == nil {
+		return fmt.Errorf("chat: recipient session unavailable")
+	}
+	if err := recipient.ReliableSession.SendReliable(protocol.StreamDirectChat, protocol.MsgMessUnicast, encoded); err != nil {
 		return err
 	}
-	select {
-	case recipient.OutboundCh <- raw:
-	default:
-		return fmt.Errorf("chat: recipient %s outbound queue full", request.Recipient)
+	// Echo the canonical server message so the sender store and browser converge.
+	if senderSession, found := state.LookupTargetByUsername(sender); found && senderSession.ReliableSession != nil {
+		if err := senderSession.ReliableSession.SendReliable(protocol.StreamDirectChat, protocol.MsgMessUnicast, encoded); err != nil {
+			return err
+		}
 	}
 	receipt := protocol.MessageDeliveredPayload{
 		MsgID:       msgID,

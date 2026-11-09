@@ -82,6 +82,9 @@ func (h *FileRelayHandler) HandleFileResponse(_ *rudp.Session, _ uint8, payload 
 	if err != nil {
 		return fmt.Errorf("file relay: encode response: %w", err)
 	}
+	if sender.ReliableSession != nil {
+		return sender.ReliableSession.SendReliable(transfer.SenderStreamID, protocol.MsgFileResponse, encoded)
+	}
 	return h.Forward(sender.OutboundCh, sender.ConnectionID, transfer.SenderStreamID, protocol.MsgFileResponse, encoded)
 }
 
