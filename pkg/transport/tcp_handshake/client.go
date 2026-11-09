@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	security "github.com/khaivutri/network-app-streaming-collaboration/pkg/crypto"
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/protocol"
 )
 
@@ -18,6 +19,7 @@ type HandshakeResult struct {
 	RTTMillis    int64
 	RTTMicros    int64
 	WelcomeMsg   string
+	Cipher       *security.SessionCipher
 }
 
 // ConnectAndHandshake performs SYN, SYN-ACK, ACK and FIN, FIN-ACK.

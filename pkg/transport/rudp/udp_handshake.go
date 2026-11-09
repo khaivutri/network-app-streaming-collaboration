@@ -2,11 +2,14 @@ package rudp
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"net"
 	"sync"
 	"time"
 
+	security "github.com/khaivutri/network-app-streaming-collaboration/pkg/crypto"
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/protocol"
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/transport"
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/transport/tcp_handshake"
@@ -243,6 +246,24 @@ func PerformUDPHandshake(ctx context.Context, serverAddr string, cfg ...UDPConfi
 	started := time.Now()
 	client := NewClientStateMachine()
 	synAction := client.Connect()
+	clientKeys, err := security.GenerateX25519KeyPair()
+	if err != nil {
+		return nil, fmt.Errorf("rudp client: generate ephemeral key: %w", err)
+	}
+	var clientNonce [16]byte
+	if _, err = rand.Read(clientNonce[:]); err != nil {
+		return nil, fmt.Errorf("rudp client: generate handshake nonce: %w", err)
+	}
+	synPayload, err := protocol.EncodeJSONPayload(protocol.HandshakeSYNPayload{
+		ClientVersion: protocol.DefaultClientVersion,
+		Timestamp:     time.Now().UnixMilli(),
+		ClientPubKey:  base64.StdEncoding.EncodeToString(clientKeys.PublicKey[:]),
+		ClientNonce:   base64.StdEncoding.EncodeToString(clientNonce[:]),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("rudp client: encode crypto hello: %w", err)
+	}
+	synAction.Packet.Payload = synPayload
 
 	synRaw, err := protocol.MarshalPacket(synAction.Packet)
 	if err != nil {
@@ -284,6 +305,26 @@ func PerformUDPHandshake(ctx context.Context, serverAddr string, cfg ...UDPConfi
 
 	if welcome == nil || welcome.Hdr.ConnectionID == 0 {
 		return nil, fmt.Errorf("rudp client: handshake timed out after %d retries", MaxHandshakeRetries)
+	}
+	var sessionCipher *security.SessionCipher
+	if welcomePayload, decodeErr := protocol.DecodeJSONPayload[protocol.HandshakeSYNACKPayload](welcome.Payload); decodeErr == nil && welcomePayload.ServerPubKey != "" && welcomePayload.ServerNonce != "" {
+		serverPubBytes, pubErr := base64.StdEncoding.DecodeString(welcomePayload.ServerPubKey)
+		serverNonceBytes, nonceErr := base64.StdEncoding.DecodeString(welcomePayload.ServerNonce)
+		if pubErr != nil || len(serverPubBytes) != 32 || nonceErr != nil || len(serverNonceBytes) != 16 {
+			return nil, fmt.Errorf("rudp client: invalid server crypto parameters")
+		}
+		var serverPub [32]byte
+		var serverNonce [16]byte
+		copy(serverPub[:], serverPubBytes)
+		copy(serverNonce[:], serverNonceBytes)
+		writeKey, readKey, deriveErr := security.DeriveSessionKeys(clientKeys.PrivateKey, serverPub, clientNonce, serverNonce, welcome.Hdr.ConnectionID, false)
+		if deriveErr != nil {
+			return nil, fmt.Errorf("rudp client: derive session keys: %w", deriveErr)
+		}
+		sessionCipher, err = security.NewSessionCipher(writeKey, readKey, false)
+		if err != nil {
+			return nil, fmt.Errorf("rudp client: create session cipher: %w", err)
+		}
 	}
 
 	// Stage 2: Complete 3-way handshake by replying with ACK.
@@ -335,5 +376,6 @@ func PerformUDPHandshake(ctx context.Context, serverAddr string, cfg ...UDPConfi
 		RTTMillis:    time.Since(started).Milliseconds(),
 		RTTMicros:    time.Since(started).Microseconds(),
 		WelcomeMsg:   protocol.DefaultWelcomeMessage,
+		Cipher:       sessionCipher,
 	}, nil
 }

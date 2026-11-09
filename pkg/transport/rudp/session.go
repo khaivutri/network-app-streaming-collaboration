@@ -7,25 +7,30 @@ import (
 	"sync"
 	"time"
 
+	security "github.com/khaivutri/network-app-streaming-collaboration/pkg/crypto"
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/protocol"
 )
 
 // Session is the per-client actor context owned by a Mux.
 type Session struct {
-	id         uint32
-	remoteAddr *net.UDPAddr
-	inboundCh  chan *protocol.Packet
-	outboundCh chan []byte
-	closeCh    chan struct{}
-	closeOnce  sync.Once
-	mu         sync.RWMutex
-	lastActive time.Time
-	isClosed   bool
-	closeErr   string
-	ctx        context.Context
-	cancel     context.CancelFunc
-	streamsMu  sync.RWMutex
-	streams    map[uint8]*Stream
+	id               uint32
+	remoteAddr       *net.UDPAddr
+	inboundCh        chan *protocol.Packet
+	outboundCh       chan []byte
+	closeCh          chan struct{}
+	closeOnce        sync.Once
+	mu               sync.RWMutex
+	lastActive       time.Time
+	isClosed         bool
+	closeErr         string
+	ctx              context.Context
+	cancel           context.CancelFunc
+	streamsMu        sync.RWMutex
+	streams          map[uint8]*Stream
+	cipherMu         sync.RWMutex
+	cipher           *security.SessionCipher
+	handshakeMu      sync.RWMutex
+	handshakePayload []byte
 }
 
 // NewSession creates a session with bounded inbound and outbound queues.
@@ -85,6 +90,37 @@ func (s *Session) LastActive() time.Time {
 
 // Context returns the session lifetime context.
 func (s *Session) Context() context.Context { return s.ctx }
+
+// SetCipher installs the authenticated encryption context for this session.
+func (s *Session) SetCipher(cipher *security.SessionCipher) {
+	s.cipherMu.Lock()
+	s.cipher = cipher
+	s.cipherMu.Unlock()
+}
+
+// Cipher returns the current authenticated encryption context, if negotiated.
+func (s *Session) Cipher() *security.SessionCipher {
+	s.cipherMu.RLock()
+	defer s.cipherMu.RUnlock()
+	return s.cipher
+}
+
+// HasCipher reports whether this session negotiated payload encryption.
+func (s *Session) HasCipher() bool { return s.Cipher() != nil }
+
+// SetHandshakePayload stores the SYN-ACK crypto metadata for idempotent retries.
+func (s *Session) SetHandshakePayload(payload []byte) {
+	s.handshakeMu.Lock()
+	s.handshakePayload = append([]byte(nil), payload...)
+	s.handshakeMu.Unlock()
+}
+
+// HandshakePayload returns a detached copy of the last SYN-ACK crypto metadata.
+func (s *Session) HandshakePayload() []byte {
+	s.handshakeMu.RLock()
+	defer s.handshakeMu.RUnlock()
+	return append([]byte(nil), s.handshakePayload...)
+}
 
 // InboundChan exposes the receive-only actor queue.
 func (s *Session) InboundChan() <-chan *protocol.Packet { return s.inboundCh }
@@ -167,9 +203,16 @@ func (s *Session) SendReliable(streamID uint8, msgType uint8, payload []byte) er
 		},
 		Payload: append([]byte(nil), payload...),
 	}
-	raw, err := protocol.MarshalPacket(pkt)
+	var raw []byte
+	var err error
+	if cipher := s.Cipher(); cipher != nil {
+		pkt.Hdr.Flags |= protocol.FlagENC
+		raw, err = cipher.EncryptPacket(pkt.Hdr, pkt.Payload)
+	} else {
+		raw, err = protocol.MarshalPacket(pkt)
+	}
 	if err != nil {
-		return fmt.Errorf("rudp: marshal reliable packet: %w", err)
+		return fmt.Errorf("rudp: encode reliable packet: %w", err)
 	}
 	stream.RecordSent(pkt, raw)
 	if !s.EnqueueOutbound(raw) {

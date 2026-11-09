@@ -2,6 +2,8 @@ package rudp
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -11,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	security "github.com/khaivutri/network-app-streaming-collaboration/pkg/crypto"
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/protocol"
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/transport"
 )
@@ -234,7 +237,7 @@ func (m *Mux) dispatch(raw []byte, addr *net.UDPAddr) {
 		return
 	}
 	if pkt.Hdr.HasFlag(protocol.FlagSYN) && !pkt.Hdr.HasFlag(protocol.FlagACK) {
-		m.handleSYN(addr)
+		m.handleSYN(addr, pkt)
 		return
 	}
 	sess, ok := m.GetSession(pkt.Hdr.ConnectionID)
@@ -242,6 +245,24 @@ func (m *Mux) dispatch(raw []byte, addr *net.UDPAddr) {
 		return
 	}
 	sess.UpdateRemoteAddr(addr)
+	if cipher := sess.Cipher(); cipher != nil && !pkt.Hdr.HasFlag(protocol.FlagENC) {
+		plaintextControl := pkt.Hdr.MsgType == protocol.MsgAck && len(pkt.Payload) == 0
+		if !plaintextControl {
+			return
+		}
+	}
+	if pkt.Hdr.HasFlag(protocol.FlagENC) {
+		cipher := sess.Cipher()
+		if cipher == nil {
+			return
+		}
+		plaintext, decryptErr := cipher.DecryptPacket(pkt.Hdr, raw[:protocol.HeaderSize], pkt.Payload)
+		if decryptErr != nil {
+			slog.Debug("rudp decrypt packet failed", "conn_id", sess.ID(), "error", decryptErr)
+			return
+		}
+		pkt.Payload = plaintext
+	}
 	if pkt.Hdr.HasFlag(protocol.FlagFIN) {
 		m.CloseSession(pkt.Hdr.ConnectionID, "CLIENT_FIN")
 		return
@@ -251,13 +272,13 @@ func (m *Mux) dispatch(raw []byte, addr *net.UDPAddr) {
 	}
 }
 
-func (m *Mux) handleSYN(addr *net.UDPAddr) {
+func (m *Mux) handleSYN(addr *net.UDPAddr, packets ...*protocol.Packet) {
 	key := remoteKey(addr)
 	m.sessionsMu.Lock()
 	if oldID, exists := m.byRemote[key]; exists {
 		sess := m.sessions[oldID]
 		m.sessionsMu.Unlock()
-		m.sendSYNACK(sess.ID(), addr)
+		m.sendSYNACK(sess.ID(), addr, sess.HandshakePayload())
 		return
 	}
 	if len(m.sessions) >= m.cfg.MaxConnections {
@@ -274,7 +295,11 @@ func (m *Mux) handleSYN(addr *net.UDPAddr) {
 	m.byRemote[key] = id
 	m.sessionsMu.Unlock()
 	m.startSession(sess)
-	m.sendSYNACK(id, addr)
+	var synAckPayload []byte
+	if len(packets) > 0 && packets[0] != nil {
+		synAckPayload = m.negotiateCipher(sess, packets[0].Payload, id, addr)
+	}
+	m.sendSYNACK(id, addr, synAckPayload)
 	if m.handler != nil {
 		safeConnected(m.handler, sess)
 	}
@@ -356,11 +381,71 @@ func (m *Mux) processSessionPacket(sess *Session, pkt *protocol.Packet) {
 	}
 }
 
-func (m *Mux) sendSYNACK(id uint32, addr *net.UDPAddr) {
-	raw, err := protocol.MarshalPacket(&protocol.Packet{Hdr: protocol.Header{Version: protocol.ProtocolVersion, Flags: protocol.FlagSYN | protocol.FlagACK, MsgType: protocol.MsgCtrlHandshake, StreamID: protocol.StreamControl, ConnectionID: id, WindowSize: protocol.DefaultWindowSize}})
+func (m *Mux) sendSYNACK(id uint32, addr *net.UDPAddr, payload []byte) {
+	raw, err := protocol.MarshalPacket(&protocol.Packet{
+		Hdr: protocol.Header{
+			Version:      protocol.ProtocolVersion,
+			Flags:        protocol.FlagSYN | protocol.FlagACK,
+			MsgType:      protocol.MsgCtrlHandshake,
+			StreamID:     protocol.StreamControl,
+			ConnectionID: id,
+			WindowSize:   protocol.DefaultWindowSize,
+		},
+		Payload: payload,
+	})
 	if err == nil {
 		_, _ = m.conn.WriteToUDP(raw, addr)
 	}
+}
+
+func (m *Mux) negotiateCipher(sess *Session, rawPayload []byte, id uint32, addr *net.UDPAddr) []byte {
+	hello, err := protocol.DecodeJSONPayload[protocol.HandshakeSYNPayload](rawPayload)
+	if err != nil || hello.ClientPubKey == "" || hello.ClientNonce == "" {
+		return nil
+	}
+	pubBytes, err := base64.StdEncoding.DecodeString(hello.ClientPubKey)
+	if err != nil || len(pubBytes) != 32 {
+		return nil
+	}
+	nonceBytes, err := base64.StdEncoding.DecodeString(hello.ClientNonce)
+	if err != nil || len(nonceBytes) != 16 {
+		return nil
+	}
+	var clientPub [32]byte
+	var clientNonce [16]byte
+	copy(clientPub[:], pubBytes)
+	copy(clientNonce[:], nonceBytes)
+	serverKeys, err := security.GenerateX25519KeyPair()
+	if err != nil {
+		return nil
+	}
+	var serverNonce [16]byte
+	if _, err := rand.Read(serverNonce[:]); err != nil {
+		return nil
+	}
+	writeKey, readKey, err := security.DeriveSessionKeys(serverKeys.PrivateKey, clientPub, clientNonce, serverNonce, id, true)
+	if err != nil {
+		return nil
+	}
+	sc, err := security.NewSessionCipher(writeKey, readKey, true)
+	if err != nil {
+		return nil
+	}
+	sess.SetCipher(sc)
+	welcome, err := protocol.EncodeJSONPayload(protocol.HandshakeSYNACKPayload{
+		Status:         protocol.HandshakeStatusAcknowledged,
+		Message:        protocol.DefaultWelcomeMessage,
+		AssignedConnID: id,
+		ClientAddr:     addr.String(),
+		ServerTime:     time.Now().UnixMilli(),
+		ServerPubKey:   base64.StdEncoding.EncodeToString(serverKeys.PublicKey[:]),
+		ServerNonce:    base64.StdEncoding.EncodeToString(serverNonce[:]),
+	})
+	if err != nil {
+		return nil
+	}
+	sess.SetHandshakePayload(welcome)
+	return welcome
 }
 
 func (m *Mux) reaperLoop() {
