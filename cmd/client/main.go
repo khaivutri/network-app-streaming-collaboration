@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"net"
@@ -12,6 +14,7 @@ import (
 	"github.com/khaivutri/network-app-streaming-collaboration/internal/client"
 	"github.com/khaivutri/network-app-streaming-collaboration/internal/client/state"
 	"github.com/khaivutri/network-app-streaming-collaboration/internal/client/transfer"
+	security "github.com/khaivutri/network-app-streaming-collaboration/pkg/crypto"
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/protocol"
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/transport"
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/transport/rudp"
@@ -82,6 +85,9 @@ func main() {
 	} else if *mode == "step7-resilience" {
 		returnWithError(runStep6File(*server, *user, *pass))
 		return
+	} else if *mode == "step8-security" {
+		returnWithError(runStep8Security(*server, *user, *pass))
+		return
 	} else {
 		err = fmt.Errorf("unsupported mode %q", *mode)
 	}
@@ -93,6 +99,99 @@ func main() {
 		return
 	}
 	fmt.Printf("Mode: %s\nLocalAddr -> ServerAddr: %s -> %s\nAssigned ConnectionID: 0x%08X (%d)\nServer Acknowledgment Message: %s\nRound-Trip Time (RTT): %d ms / %d µs\nFinal State: CONNECTED -> Gracefully Closed (FIN/FIN-ACK)\n", *mode, r.LocalAddr, r.ServerAddr, r.ConnectionID, r.ConnectionID, r.WelcomeMsg, r.RTTMillis, r.RTTMicros)
+}
+
+func runStep8Security(serverAddr, username, password string) error {
+	addr, err := net.ResolveUDPAddr("udp", serverAddr)
+	if err != nil {
+		return err
+	}
+	conn, err := net.ListenUDP("udp", nil)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	keys, err := security.GenerateX25519KeyPair()
+	if err != nil {
+		return err
+	}
+	var clientNonce [16]byte
+	if _, err = rand.Read(clientNonce[:]); err != nil {
+		return err
+	}
+	hello, err := protocol.EncodeJSONPayload(protocol.HandshakeSYNPayload{
+		ClientVersion: protocol.DefaultClientVersion,
+		Timestamp:     time.Now().UnixMilli(),
+		ClientPubKey:  base64.StdEncoding.EncodeToString(keys.PublicKey[:]),
+		ClientNonce:   base64.StdEncoding.EncodeToString(clientNonce[:]),
+	})
+	if err != nil {
+		return err
+	}
+	syn, err := protocol.MarshalPacket(&protocol.Packet{Hdr: protocol.Header{Version: protocol.ProtocolVersion, Flags: protocol.FlagSYN, MsgType: protocol.MsgCtrlHandshake, StreamID: protocol.StreamControl}, Payload: hello})
+	if err != nil {
+		return err
+	}
+	if _, err = conn.WriteToUDP(syn, addr); err != nil {
+		return err
+	}
+	buffer := make([]byte, protocol.HeaderSize+protocol.MaxUDPPayload)
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	n, _, err := conn.ReadFromUDP(buffer)
+	if err != nil {
+		return err
+	}
+	wire, err := protocol.UnmarshalPacket(buffer[:n])
+	if err != nil {
+		return err
+	}
+	welcome, err := protocol.DecodeJSONPayload[protocol.HandshakeSYNACKPayload](wire.Payload)
+	if err != nil {
+		return err
+	}
+	serverPubBytes, err := base64.StdEncoding.DecodeString(welcome.ServerPubKey)
+	if err != nil || len(serverPubBytes) != 32 {
+		return fmt.Errorf("invalid server public key")
+	}
+	serverNonceBytes, err := base64.StdEncoding.DecodeString(welcome.ServerNonce)
+	if err != nil || len(serverNonceBytes) != 16 {
+		return fmt.Errorf("invalid server nonce")
+	}
+	var serverPub [32]byte
+	var serverNonce [16]byte
+	copy(serverPub[:], serverPubBytes)
+	copy(serverNonce[:], serverNonceBytes)
+	writeKey, readKey, err := security.DeriveSessionKeys(keys.PrivateKey, serverPub, clientNonce, serverNonce, wire.Hdr.ConnectionID, false)
+	if err != nil {
+		return err
+	}
+	cipher, err := security.NewSessionCipher(writeKey, readKey, false)
+	if err != nil {
+		return err
+	}
+	ack, err := protocol.MarshalPacket(&protocol.Packet{Hdr: protocol.Header{Version: protocol.ProtocolVersion, Flags: protocol.FlagACK, MsgType: protocol.MsgCtrlHandshake, StreamID: protocol.StreamControl, ConnectionID: wire.Hdr.ConnectionID, AckNum: 1}})
+	if err != nil {
+		return err
+	}
+	if _, err = conn.WriteToUDP(ack, addr); err != nil {
+		return err
+	}
+	store := state.NewClientStore()
+	auth := client.NewAuthClient(conn, addr, wire.Hdr.ConnectionID, store)
+	auth.SetCipher(cipher)
+	loginCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resp, err := auth.Login(loginCtx, username, password)
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("login failed: %s", resp.Message)
+	}
+	chat := client.NewChatClient(conn, addr, wire.Hdr.ConnectionID, store)
+	chat.SetCipher(cipher)
+	fmt.Printf("Step 8 security authentication succeeded for %s (connection 0x%08X)\n", username, wire.Hdr.ConnectionID)
+	return nil
 }
 
 func runStep6File(serverAddr, username, password string) error {

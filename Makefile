@@ -7,7 +7,7 @@ ADDR ?= :9000
 SERVER ?= 127.0.0.1:9000
 
 .DEFAULT_GOAL := help
-.PHONY: help fmt fmt-check vet test test-proto test-tcp test-rudp test-int race cover check build server-tcp client-tcp server-udp client-udp server-step3-auth client-step3-auth server-step4-concurrency client-step4-concurrency server-step5-chat client-step5-chat server-step6-file client-step6-file server-step7-resilience client-step7-resilience test-step4 test-step5 test-step6 test-step7 smoke-step4 smoke-step5 smoke-step6 smoke-step7 smoke-tcp smoke-udp clean clean-storage
+.PHONY: help fmt fmt-check vet test test-proto test-tcp test-rudp test-int race cover check build server-tcp client-tcp server-udp client-udp server-step3-auth client-step3-auth server-step4-concurrency client-step4-concurrency server-step5-chat client-step5-chat server-step6-file client-step6-file server-step7-resilience client-step7-resilience server-step8-security client-step8-security test-step4 test-step5 test-step6 test-step7 test-step8 smoke-step4 smoke-step5 smoke-step6 smoke-step7 smoke-step8 smoke-tcp smoke-udp clean clean-storage
 
 help: ## Show available commands
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
@@ -82,6 +82,14 @@ test-step7: ## Run Step 7 resilience tests
 	$(GO) test -v -race -run=TestStep7 ./tests/integration/... ./pkg/protocol/... ./pkg/transport/rudp/... ./internal/client/...
 smoke-step7: build ## Run Step 7 malformed-packet smoke test
 	@./$(BIN_DIR)/server --mode=step7-resilience --addr=127.0.0.1:19007 --users=configs/users.json & SRV_PID=$$!; trap "kill $$SRV_PID 2>/dev/null || true" EXIT; sleep 0.5; $(GO) test -v -race -run=TestStep7_Fuzzing_MalformedPacketsResilience ./tests/integration/...
+server-step8-security: ## Run Step 8 encrypted server
+	$(GO) run ./cmd/server --mode=step8-security --addr=$(ADDR) --users=configs/users.json
+client-step8-security: ## Run Step 8 encrypted client
+	$(GO) run ./cmd/client --mode=step8-security --server=$(SERVER) --user=hung.vo --pass=Password@123
+test-step8: ## Run Step 8 cryptographic security tests
+	$(GO) test -v -race -run=TestStep8 ./tests/integration/... ./pkg/crypto/... ./pkg/transport/rudp/... ./internal/client/...
+smoke-step8: build ## Run Step 8 security smoke test
+	@./$(BIN_DIR)/server --mode=step8-security --addr=127.0.0.1:19008 --users=configs/users.json & SRV_PID=$$!; trap "kill $$SRV_PID 2>/dev/null || true" EXIT; sleep 0.5; $(GO) test -v -race -run=TestStep8 ./tests/integration/...
 clean-storage: ## Remove partial and completed local transfer files
 	rm -rf storage/staging/* storage/downloads/*
 smoke-tcp: build ## Run TCP smoke test
