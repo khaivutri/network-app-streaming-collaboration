@@ -33,6 +33,16 @@ Mở `http://127.0.0.1:8081`. Client Agent chỉ bind loopback; browser gửi l�
 
 Chạy nhiều client trên cùng máy bằng UI port và storage directory khác nhau, ví dụ `8082`/`storage/client-8082`. Giới hạn upload mặc định là 1 GiB và có thể đổi bằng `--max-upload-bytes`.
 
+Có thể dùng Makefile để chạy demo hai người trên cùng máy. Mở ba terminal trong thư mục repository:
+
+```powershell
+make server-step9-http-ui
+make client-step9-http-ui-1
+make client-step9-http-ui-2
+```
+
+Mở `http://127.0.0.1:8081` và `http://127.0.0.1:8082`. Hai target client dùng port/storage riêng; đăng nhập Client 1 bằng `hung.vo / Password@123`, Client 2 bằng `Alice / Alice@123`. Có thể đổi server hoặc port bằng biến Make, ví dụ `make client-step9-http-ui-2 SERVER=127.0.0.1:19000 CLIENT2_UI_ADDR=127.0.0.1:8092`.
+
 Kiểm thử riêng Step 9:
 
 ```powershell
