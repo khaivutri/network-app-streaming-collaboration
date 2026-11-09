@@ -12,6 +12,7 @@ import (
 
 	"github.com/khaivutri/network-app-streaming-collaboration/internal/client/state"
 	"github.com/khaivutri/network-app-streaming-collaboration/internal/client/transfer"
+	security "github.com/khaivutri/network-app-streaming-collaboration/pkg/crypto"
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/protocol"
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/transport/rudp"
 )
@@ -32,6 +33,21 @@ type ChatClient struct {
 	lastServerActive time.Time
 	rto              *rudp.AdaptiveRTO
 	lastError        string
+	cipherMu         sync.RWMutex
+	cipher           *security.SessionCipher
+}
+
+// SetCipher enables directional encryption for chat and file traffic.
+func (c *ChatClient) SetCipher(cipher *security.SessionCipher) {
+	c.cipherMu.Lock()
+	c.cipher = cipher
+	c.cipherMu.Unlock()
+}
+
+func (c *ChatClient) getCipher() *security.SessionCipher {
+	c.cipherMu.RLock()
+	defer c.cipherMu.RUnlock()
+	return c.cipher
 }
 
 const clientSocketBufferSize = 4 * 1024 * 1024
@@ -225,6 +241,16 @@ func (c *ChatClient) Listen(ctx context.Context) (err error) {
 		if parseErr != nil {
 			continue
 		}
+		if packet.Hdr.HasFlag(protocol.FlagENC) {
+			cipher := c.getCipher()
+			if cipher == nil {
+				continue
+			}
+			packet.Payload, parseErr = cipher.DecryptPacket(packet.Hdr, buffer[:protocol.HeaderSize], packet.Payload)
+			if parseErr != nil {
+				continue
+			}
+		}
 		c.handlePacket(packet)
 	}
 }
@@ -264,7 +290,14 @@ func (c *ChatClient) sendPayloadWithSeq(stream *rudp.Stream, streamID, msgType u
 		},
 		Payload: payload,
 	}
-	raw, err := protocol.MarshalPacket(packet)
+	var raw []byte
+	var err error
+	if cipher := c.getCipher(); cipher != nil {
+		packet.Hdr.Flags |= protocol.FlagENC
+		raw, err = cipher.EncryptPacket(packet.Hdr, packet.Payload)
+	} else {
+		raw, err = protocol.MarshalPacket(packet)
+	}
 	if err != nil {
 		return fmt.Errorf("chat client: marshal packet: %w", err)
 	}

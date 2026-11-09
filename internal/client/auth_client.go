@@ -7,6 +7,8 @@ import (
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/protocol"
 	"net"
 	"time"
+
+	security "github.com/khaivutri/network-app-streaming-collaboration/pkg/crypto"
 )
 
 // AuthClient owns the UDP request/response flow for one connection.
@@ -15,7 +17,11 @@ type AuthClient struct {
 	server       *net.UDPAddr
 	connectionID uint32
 	store        *state.ClientStore
+	cipher       *security.SessionCipher
 }
+
+// SetCipher enables directional payload encryption for authentication traffic.
+func (c *AuthClient) SetCipher(cipher *security.SessionCipher) { c.cipher = cipher }
 
 // NewAuthClient binds a client socket to a server endpoint and connection ID.
 func NewAuthClient(conn *net.UDPConn, server *net.UDPAddr, connectionID uint32, store *state.ClientStore) *AuthClient {
@@ -77,16 +83,20 @@ func (c *AuthClient) send(ctx context.Context, msgType uint8, value any) error {
 	if err != nil {
 		return err
 	}
-	raw, err := protocol.MarshalPacket(&protocol.Packet{
-		Hdr: protocol.Header{
-			Version:      protocol.ProtocolVersion,
-			Flags:        protocol.FlagREL | protocol.FlagORD,
-			MsgType:      msgType,
-			StreamID:     protocol.StreamControl,
-			ConnectionID: c.connectionID,
-			WindowSize:   protocol.DefaultWindowSize,
-		}, Payload: payload,
-	})
+	hdr := protocol.Header{
+		Version:      protocol.ProtocolVersion,
+		Flags:        protocol.FlagREL | protocol.FlagORD,
+		MsgType:      msgType,
+		StreamID:     protocol.StreamControl,
+		ConnectionID: c.connectionID,
+		WindowSize:   protocol.DefaultWindowSize,
+	}
+	var raw []byte
+	if c.cipher != nil {
+		raw, err = c.cipher.EncryptPacket(hdr, payload)
+	} else {
+		raw, err = protocol.MarshalPacket(&protocol.Packet{Hdr: hdr, Payload: payload})
+	}
 	if err != nil {
 		return err
 	}
@@ -119,6 +129,9 @@ func (c *AuthClient) read(ctx context.Context, expected uint8) (*protocol.Packet
 			return nil, err
 		}
 		pkt, err := protocol.UnmarshalPacket(buf[:n])
+		if err == nil && pkt.Hdr.HasFlag(protocol.FlagENC) && c.cipher != nil {
+			pkt.Payload, err = c.cipher.DecryptPacket(pkt.Hdr, buf[:protocol.HeaderSize], pkt.Payload)
+		}
 		if err == nil && pkt.Hdr.MsgType == expected {
 			return pkt, nil
 		}
