@@ -20,7 +20,7 @@ import (
 
 // ChatClient sends and receives Step 5 messages on one authenticated UDP socket.
 type ChatClient struct {
-	conn              *net.UDPConn
+	conn              rudp.PacketConn
 	server            *net.UDPAddr
 	connID            uint32
 	store             *state.ClientStore
@@ -57,12 +57,12 @@ const clientSocketBufferSize = 4 * 1024 * 1024
 const fileAcceptanceTimeout = 10 * time.Second
 
 // NewChatClient creates a chat facade over an existing authenticated socket.
-func NewChatClient(conn *net.UDPConn, server *net.UDPAddr, connectionID uint32, store *state.ClientStore) *ChatClient {
+func NewChatClient(conn rudp.PacketConn, server *net.UDPAddr, connectionID uint32, store *state.ClientStore) *ChatClient {
 	return NewChatClientWithStorage(conn, server, connectionID, store, filepath.Join("storage", "staging"), filepath.Join("storage", "downloads"))
 }
 
 // NewChatClientWithStorage creates a chat facade with explicit transfer directories.
-func NewChatClientWithStorage(conn *net.UDPConn, server *net.UDPAddr, connectionID uint32, store *state.ClientStore, stagingDir, downloadDir string) *ChatClient {
+func NewChatClientWithStorage(conn rudp.PacketConn, server *net.UDPAddr, connectionID uint32, store *state.ClientStore, stagingDir, downloadDir string) *ChatClient {
 	if conn != nil {
 		_ = conn.SetReadBuffer(clientSocketBufferSize)
 		_ = conn.SetWriteBuffer(clientSocketBufferSize)

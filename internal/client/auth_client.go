@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/khaivutri/network-app-streaming-collaboration/internal/client/state"
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/protocol"
+	"github.com/khaivutri/network-app-streaming-collaboration/pkg/transport/rudp"
 	"net"
 	"time"
 
@@ -13,7 +14,7 @@ import (
 
 // AuthClient owns the UDP request/response flow for one connection.
 type AuthClient struct {
-	conn         *net.UDPConn
+	conn         rudp.PacketConn
 	server       *net.UDPAddr
 	connectionID uint32
 	store        *state.ClientStore
@@ -24,7 +25,7 @@ type AuthClient struct {
 func (c *AuthClient) SetCipher(cipher *security.SessionCipher) { c.cipher = cipher }
 
 // NewAuthClient binds a client socket to a server endpoint and connection ID.
-func NewAuthClient(conn *net.UDPConn, server *net.UDPAddr, connectionID uint32, store *state.ClientStore) *AuthClient {
+func NewAuthClient(conn rudp.PacketConn, server *net.UDPAddr, connectionID uint32, store *state.ClientStore) *AuthClient {
 	return &AuthClient{conn: conn, server: server, connectionID: connectionID, store: store}
 }
 

@@ -14,6 +14,7 @@ import (
 	"github.com/khaivutri/network-app-streaming-collaboration/internal/client/transfer"
 	security "github.com/khaivutri/network-app-streaming-collaboration/pkg/crypto"
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/protocol"
+	"github.com/khaivutri/network-app-streaming-collaboration/pkg/transport/rudp"
 )
 
 var (
@@ -39,6 +40,7 @@ type AppConfig struct {
 	DownloadDir      string
 	HandshakeTimeout time.Duration
 	RequestTimeout   time.Duration
+	NetEm            rudp.NetEmConfig
 }
 
 // SessionSnapshot is the minimal network-facing result returned by login.
@@ -55,7 +57,7 @@ type ClientApp struct {
 	store           *state.ClientStore
 	eventBus        *events.Bus
 	lifecycleMu     sync.Mutex
-	conn            *net.UDPConn
+	conn            rudp.PacketConn
 	server          *net.UDPAddr
 	connectionID    uint32
 	cipher          *security.SessionCipher
@@ -100,7 +102,7 @@ func (a *ClientApp) Login(ctx context.Context, username, password string) (Sessi
 	if a.chat != nil || a.store.IsLoggedIn() {
 		return SessionSnapshot{}, ErrClientAlreadyAuthenticated
 	}
-	session, err := dialPersistentSession(ctx, a.config.ServerAddr, a.config.HandshakeTimeout)
+	session, err := dialPersistentSession(ctx, a.config.ServerAddr, a.config.HandshakeTimeout, a.config.NetEm)
 	if err != nil {
 		return SessionSnapshot{}, err
 	}
@@ -342,7 +344,7 @@ func (a *ClientApp) reconnectOnce() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), a.config.RequestTimeout)
 	defer cancel()
-	session, err := dialPersistentSession(ctx, a.config.ServerAddr, a.config.HandshakeTimeout)
+	session, err := dialPersistentSession(ctx, a.config.ServerAddr, a.config.HandshakeTimeout, a.config.NetEm)
 	if err != nil {
 		return err
 	}

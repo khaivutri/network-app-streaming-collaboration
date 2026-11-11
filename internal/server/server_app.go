@@ -25,6 +25,11 @@ type ServerApp struct {
 
 // NewServerApp creates a Step 4 server bound to listenAddr.
 func NewServerApp(listenAddr, usersPath string) (*ServerApp, error) {
+	return NewServerAppWithNetEm(listenAddr, usersPath, rudp.NetEmConfig{})
+}
+
+// NewServerAppWithNetEm creates the server with outbound UDP impairment enabled.
+func NewServerAppWithNetEm(listenAddr, usersPath string, netEm rudp.NetEmConfig) (*ServerApp, error) {
 	credStore, err := state.LoadCredentialStore(usersPath)
 	if err != nil {
 		return nil, fmt.Errorf("server: load users: %w", err)
@@ -38,7 +43,9 @@ func NewServerApp(listenAddr, usersPath string) (*ServerApp, error) {
 	app.router.SetPanicHandler(func(sess *rudp.Session, msgType uint8, panicErr error) {
 		_ = app.sendJSON(sess, protocol.MsgError, protocol.ErrorMessagePayload{Code: protocol.ErrCodeInternalServer, Message: "Hệ thống bận, vui lòng thử lại", RefMsgType: msgType, Recoverable: true, ServerTime: time.Now().UnixMilli()})
 	})
-	mux, err := rudp.NewMux(rudp.DefaultMuxConfig(listenAddr), app)
+	muxConfig := rudp.DefaultMuxConfig(listenAddr)
+	muxConfig.NetEm = netEm
+	mux, err := rudp.NewMux(muxConfig, app)
 	if err != nil {
 		return nil, fmt.Errorf("server: create mux: %w", err)
 	}

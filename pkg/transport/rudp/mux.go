@@ -35,6 +35,7 @@ type MuxConfig struct {
 	HandshakeTimeout   time.Duration
 	ReaperInterval     time.Duration
 	SessionIdleTimeout time.Duration
+	NetEm              NetEmConfig
 }
 
 // DefaultMuxConfig returns production-oriented bounded defaults.
@@ -66,7 +67,7 @@ type AckHandler interface {
 
 // Mux is a single-socket UDP reactor with per-session actor queues.
 type Mux struct {
-	conn       *net.UDPConn
+	conn       PacketConn
 	cfg        MuxConfig
 	handler    PacketHandler
 	sessions   map[uint32]*Session
@@ -117,9 +118,14 @@ func NewMux(cfg MuxConfig, handler PacketHandler) (*Mux, error) {
 	if err := configureUDPSocket(conn); err != nil {
 		slog.Debug("rudp socket resilience configuration unavailable", "error", err)
 	}
+	packetConn, err := NewNetEmConn(conn, cfg.NetEm)
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("rudp: configure network emulator: %w", err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	m := &Mux{
-		conn: conn, cfg: cfg, handler: handler, sessions: make(map[uint32]*Session),
+		conn: packetConn, cfg: cfg, handler: handler, sessions: make(map[uint32]*Session),
 		byRemote: make(map[string]uint32), ctx: ctx, cancel: cancel,
 	}
 	m.bufPool.New = func() any { b := make([]byte, protocol.HeaderSize+protocol.MaxUDPPayload); return &b }

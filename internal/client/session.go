@@ -10,13 +10,14 @@ import (
 
 	security "github.com/khaivutri/network-app-streaming-collaboration/pkg/crypto"
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/protocol"
+	"github.com/khaivutri/network-app-streaming-collaboration/pkg/transport/rudp"
 )
 
 const defaultHandshakeTimeout = 3 * time.Second
 
 // NetworkSession is a live client-side UDP connection after the three-way handshake.
 type NetworkSession struct {
-	Conn         *net.UDPConn
+	Conn         rudp.PacketConn
 	Server       *net.UDPAddr
 	ConnectionID uint32
 	Cipher       *security.SessionCipher
@@ -25,7 +26,7 @@ type NetworkSession struct {
 // dialPersistentSession performs the crypto handshake without sending FIN.
 // The benchmark helper in pkg/transport/rudp intentionally closes its socket,
 // so the UI agent uses this lifecycle-specific implementation instead.
-func dialPersistentSession(ctx context.Context, serverAddr string, timeout time.Duration) (*NetworkSession, error) {
+func dialPersistentSession(ctx context.Context, serverAddr string, timeout time.Duration, netEm rudp.NetEmConfig) (*NetworkSession, error) {
 	if timeout <= 0 {
 		timeout = defaultHandshakeTimeout
 	}
@@ -37,8 +38,13 @@ func dialPersistentSession(ctx context.Context, serverAddr string, timeout time.
 	if err != nil {
 		return nil, fmt.Errorf("client session: bind socket: %w", err)
 	}
-	closeOnError := func(cause error) (*NetworkSession, error) {
+	packetConn, err := rudp.NewNetEmConn(conn, netEm)
+	if err != nil {
 		_ = conn.Close()
+		return nil, err
+	}
+	closeOnError := func(cause error) (*NetworkSession, error) {
+		_ = packetConn.Close()
 		return nil, cause
 	}
 
@@ -71,20 +77,20 @@ func dialPersistentSession(ctx context.Context, serverAddr string, timeout time.
 	if err != nil {
 		return closeOnError(fmt.Errorf("client session: marshal SYN: %w", err))
 	}
-	if _, err := conn.WriteToUDP(syn, server); err != nil {
+	if _, err := packetConn.WriteToUDP(syn, server); err != nil {
 		return closeOnError(fmt.Errorf("client session: send SYN: %w", err))
 	}
 	deadline := time.Now().Add(timeout)
 	if value, ok := ctx.Deadline(); ok && value.Before(deadline) {
 		deadline = value
 	}
-	if err := conn.SetReadDeadline(deadline); err != nil {
+	if err := packetConn.SetReadDeadline(deadline); err != nil {
 		return closeOnError(fmt.Errorf("client session: set handshake deadline: %w", err))
 	}
 	buffer := make([]byte, protocol.HeaderSize+protocol.MaxUDPPayload+security.Overhead)
 	var welcome *protocol.Packet
 	for {
-		n, remote, readErr := conn.ReadFromUDP(buffer)
+		n, remote, readErr := packetConn.ReadFromUDP(buffer)
 		if readErr != nil {
 			if ctx.Err() != nil {
 				return closeOnError(ctx.Err())
@@ -145,14 +151,14 @@ func dialPersistentSession(ctx context.Context, serverAddr string, timeout time.
 	if err != nil {
 		return closeOnError(fmt.Errorf("client session: marshal ACK: %w", err))
 	}
-	if _, err := conn.WriteToUDP(ack, server); err != nil {
+	if _, err := packetConn.WriteToUDP(ack, server); err != nil {
 		return closeOnError(fmt.Errorf("client session: send ACK: %w", err))
 	}
-	if err := conn.SetReadDeadline(time.Time{}); err != nil {
+	if err := packetConn.SetReadDeadline(time.Time{}); err != nil {
 		return closeOnError(fmt.Errorf("client session: clear read deadline: %w", err))
 	}
 	return &NetworkSession{
-		Conn:         conn,
+		Conn:         packetConn,
 		Server:       server,
 		ConnectionID: welcome.Hdr.ConnectionID,
 		Cipher:       sessionCipher,
