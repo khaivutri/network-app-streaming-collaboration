@@ -1,0 +1,17 @@
+# Git & IDE
+.git
+.gitignore
+.vscode
+.idea
+
+# Build artifacts & local storage
+bin/
+storage/
+coverage.out
+*.exe
+*.test
+*.out
+
+# Node / test artifacts
+node_modules/
+

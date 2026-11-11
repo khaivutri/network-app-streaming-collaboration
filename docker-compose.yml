@@ -1,0 +1,93 @@
+services:
+  # ----------------------------------------------------------------------------
+  # 1. Central RUDP Coordination Server (:9000/udp)
+  # ----------------------------------------------------------------------------
+  mmt-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mmt-collaboration:latest
+    container_name: mmt-server
+    command:
+      - server
+      - --mode=full
+      - --addr=0.0.0.0:9000
+      - --users=configs/users.json
+    ports:
+      - "9000:9000/udp"
+    volumes:
+      - ./configs/users.json:/app/configs/users.json:ro
+    networks:
+      - mmt-network
+    restart: unless-stopped
+
+  # ----------------------------------------------------------------------------
+  # 2. Client Agent 1 (Demo user: hung.vo / Password@123) -> http://localhost:8081
+  # ----------------------------------------------------------------------------
+  mmt-client-1:
+    image: mmt-collaboration:latest
+    container_name: mmt-client-1
+    depends_on:
+      - mmt-server
+    command:
+      - client
+      - --mode=ui
+      - --server=mmt-server:9000
+      - --ui-addr=0.0.0.0:8081
+      - --storage=/app/storage
+    ports:
+      - "127.0.0.1:8081:8081/tcp"
+    volumes:
+      - ./storage/client1:/app/storage
+    networks:
+      - mmt-network
+    restart: unless-stopped
+
+  # ----------------------------------------------------------------------------
+  # 3. Client Agent 2 (Demo user: Alice / Alice@123) -> http://localhost:8082
+  # ----------------------------------------------------------------------------
+  mmt-client-2:
+    image: mmt-collaboration:latest
+    container_name: mmt-client-2
+    depends_on:
+      - mmt-server
+    command:
+      - client
+      - --mode=ui
+      - --server=mmt-server:9000
+      - --ui-addr=0.0.0.0:8082
+      - --storage=/app/storage
+    ports:
+      - "127.0.0.1:8082:8082/tcp"
+    volumes:
+      - ./storage/client2:/app/storage
+    networks:
+      - mmt-network
+    restart: unless-stopped
+
+  # ----------------------------------------------------------------------------
+  # 4. Client Agent 3 (Demo user: Bob / Bob@123) -> http://localhost:8083
+  # ----------------------------------------------------------------------------
+  mmt-client-3:
+    image: mmt-collaboration:latest
+    container_name: mmt-client-3
+    depends_on:
+      - mmt-server
+    command:
+      - client
+      - --mode=ui
+      - --server=mmt-server:9000
+      - --ui-addr=0.0.0.0:8083
+      - --storage=/app/storage
+    ports:
+      - "127.0.0.1:8083:8083/tcp"
+    volumes:
+      - ./storage/client3:/app/storage
+    networks:
+      - mmt-network
+    restart: unless-stopped
+
+networks:
+  mmt-network:
+    driver: bridge
+

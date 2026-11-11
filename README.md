@@ -8,6 +8,7 @@ A Go based collaboration app with a reliable UDP transport, authenticated and en
 - [Requirements](#requirements)
 - [Quick start](#quick-start)
 - [Run multiple clients](#run-multiple-clients)
+- [Docker quick start](#docker-quick-start)
 - [Use the app](#use-the-app)
 - [Configuration](#configuration)
 - [Network simulation](#network-simulation)
@@ -71,6 +72,30 @@ Run one server and one client agent per terminal. Each client needs its own UI p
 Open each URL in a separate browser tab or window. Sign in with that row's account. The peer list should show the other connected users. Send a room message or select a peer to send a direct message.
 
 To stop a client or the server, focus its terminal and press **Ctrl+C**. Stop the client agents before stopping the server so they can send their logout request.
+
+## Docker quick start
+
+You can also launch the complete multi-client topology (one central RUDP server and three client UI agents) with a single Docker Compose command:
+
+```powershell
+docker compose up --build -d
+```
+
+This starts the following containers on an isolated bridge network (`mmt-network`):
+
+| Container | Role | Host browser address | Storage volume on host | Suggested demo user |
+| --- | --- | --- | --- | --- |
+| `mmt-server` | Central RUDP Server (`:9000/udp`) | — | `configs/users.json` (read-only) | — |
+| `mmt-client-1` | Client Agent 1 | `http://127.0.0.1:8081` | `./storage/client1` | `hung.vo` (`Password@123`) |
+| `mmt-client-2` | Client Agent 2 | `http://127.0.0.1:8082` | `./storage/client2` | `Alice` (`Alice@123`) |
+| `mmt-client-3` | Client Agent 3 | `http://127.0.0.1:8083` | `./storage/client3` | `Bob` (`Bob@123`) |
+
+View logs or stop the containers:
+
+```powershell
+docker compose logs -f
+docker compose down
+```
 
 ## Use the app
 

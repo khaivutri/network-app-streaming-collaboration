@@ -85,10 +85,10 @@ func (s *Server) CSRFToken() string { return s.csrfToken }
 // Handler returns the fully protected HTTP handler for httptest or embedding.
 func (s *Server) Handler() http.Handler { return s.http.Handler }
 
-// Start binds loopback and serves until the context is cancelled.
+// Start binds loopback (or container 0.0.0.0) and serves until the context is cancelled.
 func (s *Server) Start(ctx context.Context) error {
-	if !strings.HasPrefix(s.config.ListenAddr, "127.0.0.1:") {
-		return fmt.Errorf("webbridge: listen address must bind 127.0.0.1")
+	if !strings.HasPrefix(s.config.ListenAddr, "127.0.0.1:") && !strings.HasPrefix(s.config.ListenAddr, "0.0.0.0:") {
+		return fmt.Errorf("webbridge: listen address must bind 127.0.0.1 or 0.0.0.0")
 	}
 	listener, err := net.Listen("tcp", s.config.ListenAddr)
 	if err != nil {
