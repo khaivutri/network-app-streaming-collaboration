@@ -19,11 +19,22 @@ import (
 )
 
 func main() {
-	mode := flag.String("mode", "step2-tcp", "transport mode")
+	mode := flag.String("mode", "full", "server mode (full, step2-tcp, rudp, step3-auth..step9-http-ui)")
 	addr := flag.String("addr", ":9000", "listen address")
 	users := flag.String("users", "configs/users.json", "credential JSON file")
+	loss := flag.Float64("loss", 0, "outbound packet loss rate (0..1)")
+	jitter := flag.Duration("jitter", 0, "maximum outbound packet jitter")
+	delay := flag.Duration("delay", 0, "base outbound packet delay")
+	reorder := flag.Float64("reorder", 0, "outbound packet reorder rate (0..1)")
+	corrupt := flag.Float64("corrupt", 0, "outbound packet corruption rate (0..1)")
+	duplicate := flag.Float64("duplicate", 0, "outbound packet duplication rate (0..1)")
 	_ = flag.String("log-level", "info", "log level")
 	flag.Parse()
+	netEm := rudp.NetEmConfig{Enabled: *loss+jitter.Seconds()+delay.Seconds()+*reorder+*corrupt+*duplicate > 0, DropRate: *loss, MaxJitter: *jitter, BaseLatency: *delay, ReorderRate: *reorder, CorruptRate: *corrupt, DuplicateRate: *duplicate}
+	if err := netEm.Validate(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	var err error
@@ -42,7 +53,7 @@ func main() {
 	} else if *mode == "step3-auth" {
 		err = serveAuth(ctx, *addr, *users)
 	} else if *mode == "step4-concurrency" {
-		srvApp, srvErr := server.NewServerApp(*addr, *users)
+		srvApp, srvErr := server.NewServerAppWithNetEm(*addr, *users, netEm)
 		if srvErr != nil {
 			err = srvErr
 		} else {
@@ -50,7 +61,7 @@ func main() {
 			err = srvApp.Serve(ctx)
 		}
 	} else if *mode == "step5-chat" {
-		srvApp, srvErr := server.NewServerApp(*addr, *users)
+		srvApp, srvErr := server.NewServerAppWithNetEm(*addr, *users, netEm)
 		if srvErr != nil {
 			err = srvErr
 		} else {
@@ -58,7 +69,7 @@ func main() {
 			err = srvApp.Serve(ctx)
 		}
 	} else if *mode == "step6-file" {
-		srvApp, srvErr := server.NewServerApp(*addr, *users)
+		srvApp, srvErr := server.NewServerAppWithNetEm(*addr, *users, netEm)
 		if srvErr != nil {
 			err = srvErr
 		} else {
@@ -66,7 +77,7 @@ func main() {
 			err = srvApp.Serve(ctx)
 		}
 	} else if *mode == "step7-resilience" {
-		srvApp, srvErr := server.NewServerApp(*addr, *users)
+		srvApp, srvErr := server.NewServerAppWithNetEm(*addr, *users, netEm)
 		if srvErr != nil {
 			err = srvErr
 		} else {
@@ -74,15 +85,15 @@ func main() {
 			err = srvApp.Serve(ctx)
 		}
 	} else if *mode == "step8-security" {
-		srvApp, srvErr := server.NewServerApp(*addr, *users)
+		srvApp, srvErr := server.NewServerAppWithNetEm(*addr, *users, netEm)
 		if srvErr != nil {
 			err = srvErr
 		} else {
 			fmt.Printf("Step 8 Security Server (X25519 + AES-256-GCM) listening on %s\n", srvApp.Addr())
 			err = srvApp.Serve(ctx)
 		}
-	} else if *mode == "step9-http-ui" {
-		srvApp, srvErr := server.NewServerApp(*addr, *users)
+	} else if *mode == "step9-http-ui" || *mode == "full" {
+		srvApp, srvErr := server.NewServerAppWithNetEm(*addr, *users, netEm)
 		if srvErr != nil {
 			err = srvErr
 		} else {
