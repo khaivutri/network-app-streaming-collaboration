@@ -179,7 +179,7 @@ func (h *FileRelayHandler) HandleFileComplete(_ *rudp.Session, _ uint8, payload 
 		return fmt.Errorf("file relay: decode complete: %w", err)
 	}
 	transfer, ok := state.RemoveActiveTransfer(complete.TransferID)
-	if !ok || transfer == nil {
+	if !ok {
 		return nil
 	}
 	sender, ok := state.LookupTargetByUsername(transfer.SenderUsername)
@@ -199,11 +199,17 @@ func (h *FileRelayHandler) HandleFileCancel(sess *rudp.Session, _ uint8, payload
 	if err != nil {
 		return fmt.Errorf("file relay: decode cancel: %w", err)
 	}
-	transfer, ok := state.RemoveActiveTransfer(cancel.TransferID)
-	if !ok || transfer == nil {
+	transfer, ok := state.LookupActiveTransfer(cancel.TransferID)
+	if !ok {
 		return nil
 	}
 	username, _ := state.LookupUsernameByConnID(sess.ID())
+	if sess.ID() != transfer.SenderConnID && sess.ID() != transfer.ReceiverConnID {
+		return fmt.Errorf("file relay: unauthorised cancel sender")
+	}
+	if _, ok := state.RemoveActiveTransfer(cancel.TransferID); !ok {
+		return nil
+	}
 	cancel.CancelledBy = username
 	peerName, peerStream := transfer.ReceiverUsername, transfer.ReceiverStreamID
 	if username == transfer.ReceiverUsername {
@@ -217,7 +223,8 @@ func (h *FileRelayHandler) HandleFileCancel(sess *rudp.Session, _ uint8, payload
 	if err != nil {
 		return fmt.Errorf("file relay: encode cancel: %w", err)
 	}
-	return h.Forward(peer.OutboundCh, peer.ConnectionID, peerStream, protocol.MsgFileCancel, encoded)
+	_ = peerStream
+	return h.Forward(peer.OutboundCh, peer.ConnectionID, protocol.StreamControl, protocol.MsgFileCancel, encoded)
 }
 
 func (h *FileRelayHandler) sendJSON(sess *rudp.Session, streamID, msgType uint8, value any) error {

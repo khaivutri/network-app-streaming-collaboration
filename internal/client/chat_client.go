@@ -162,7 +162,7 @@ func (c *ChatClient) failTransfer(id, message string) {
 
 // CancelTransfer stops a transfer and removes any partial local file.
 func (c *ChatClient) CancelTransfer(id string) error {
-	if err := c.send(c.transferStream(id), protocol.MsgFileCancel, protocol.FileCancelPayload{
+	if err := c.sendUnsequenced(protocol.StreamControl, protocol.MsgFileCancel, protocol.FileCancelPayload{
 		TransferID: id,
 		Reason:     protocol.FileCodeUserCancelled,
 		Timestamp:  time.Now().UnixMilli(),
@@ -186,6 +186,31 @@ func (c *ChatClient) CancelTransfer(id string) error {
 		State:      "CANCELLED",
 	})
 	c.releaseTransferStream(id)
+	return nil
+}
+
+// sendUnsequenced sends urgent file control without participating in data ordering.
+func (c *ChatClient) sendUnsequenced(streamID, msgType uint8, value any) error {
+	payload, err := protocol.EncodeJSONPayload(value)
+	if err != nil {
+		return err
+	}
+	stream := c.getStream(streamID)
+	ack, bitmap, window := stream.ComputeAckState()
+	hdr := protocol.Header{Version: protocol.ProtocolVersion, Flags: protocol.FlagACK, MsgType: msgType, StreamID: streamID, ConnectionID: c.connID, AckNum: ack, AckBitmap: bitmap, WindowSize: window}
+	var raw []byte
+	if cipher := c.getCipher(); cipher != nil {
+		hdr.Flags |= protocol.FlagENC
+		raw, err = cipher.EncryptPacket(hdr, payload)
+	} else {
+		raw, err = protocol.MarshalPacket(&protocol.Packet{Hdr: hdr, Payload: payload})
+	}
+	if err != nil {
+		return err
+	}
+	if _, err = c.conn.WriteToUDP(raw, c.server); err != nil {
+		return err
+	}
 	return nil
 }
 
