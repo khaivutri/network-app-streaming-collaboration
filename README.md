@@ -97,6 +97,23 @@ docker compose logs -f
 docker compose down
 ```
 
+### Simulate packet loss and jitter in Docker
+
+Add `--loss` and/or `--jitter` to the relevant service's `command` list in `docker-compose.yml`. These are command-line flags (not environment variables). For example, to simulate 5% outbound packet loss and up to 30 ms of extra outbound delay from Client 2, add these entries under `mmt-client-2`'s existing `command`:
+
+```yaml
+      - --loss=0.05
+      - --jitter=30ms
+```
+
+Recreate the service to apply the change:
+
+```powershell
+docker compose up --build -d mmt-client-2
+```
+
+Impairments are outbound and apply only to the process configured. Configure the same flags on `mmt-server` as well to simulate impaired traffic in both directions. Add them to a client to affect that client's outgoing traffic; add them to the server to affect server-to-client traffic. `--loss` accepts a rate from `0` to `1` (`0.05` means 5%). `--jitter` accepts a non-negative Go duration such as `20ms`; each outbound packet gets a random additional delay from 0 up to the configured maximum. It does not set a fixed round-trip time.
+
 ## Use the app
 
 The browser UI supports peer discovery, broadcast and direct chat, and file transfer. For a small file-transfer check, choose a file in one client, send it to a connected peer, and save the received file. The default per-upload limit is 1 GiB.
@@ -172,6 +189,19 @@ go run ./cmd/client --mode ui --server 127.0.0.1:9000 --ui-port 8083 --storage s
 ```
 
 The supported options are `--loss`, `--reorder`, `--duplicate`, and `--corrupt` with rates from `0` to `1`, plus `--delay` and `--jitter` as non-negative Go durations such as `20ms`. The same flags are accepted by the server. Configure both sides to simulate impairments in both directions. Loss and corruption can prevent a session from completing, so begin with a low rate. Rates are validated before sockets are opened.
+
+Use these jitter ranges as illustrative test scenarios. The labels describe the added variation being simulated, not a universal rating of a real network; actual quality also depends on baseline latency, packet loss, route, and application needs.
+
+| `--jitter` value | Example scenario | What it simulates |
+| --- | --- | --- |
+| `0ms` | Stable link | No added packet delay variation. |
+| `1–10ms` | Very stable / good network | Small variation, similar to a steady local or well-connected link. |
+| `10–30ms` | Typical variable Wi-Fi or busy link | Noticeable timing variation while interactive chat should generally remain responsive. |
+| `30–80ms` | Unstable or congested connection | Large variation; packet arrivals may feel uneven and transfers may slow as retransmissions and buffering respond. |
+| `80–150ms` | Poor / highly unstable connection | Severe variation that can make interactive use feel laggy. |
+| `Over 150ms` | Extreme impairment test | Very large delay swings, useful for stress testing rather than representing a normal connection. |
+
+The configured value is the **maximum additional one-way delay per outbound packet**, sampled from 0 to that value. For example, `--jitter=30ms` means each packet can get 0–30 ms of extra delay; it does not mean every packet is delayed by 30 ms. Use `--delay` when you also want a fixed base delay.
 
 ## Troubleshooting
 
