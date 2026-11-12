@@ -97,9 +97,9 @@ docker compose logs -f
 docker compose down
 ```
 
-### Simulate packet loss and jitter in Docker
+### Run a network simulation in Docker
 
-Add `--loss` and/or `--jitter` to the relevant service's `command` list in `docker-compose.yml`. These are command-line flags (not environment variables). For example, to simulate 5% outbound packet loss and up to 30 ms of extra outbound delay from Client 2, add these entries under `mmt-client-2`'s existing `command`:
+Add the impairment flags to the relevant service's `command` list in `docker-compose.yml` (they are command-line flags, not environment variables). For example, add these entries under `mmt-client-2`'s existing `command` to model a lossy, variable connection:
 
 ```yaml
       - --loss=0.05
@@ -112,7 +112,7 @@ Recreate the service to apply the change:
 docker compose up --build -d mmt-client-2
 ```
 
-Impairments are outbound and apply only to the process configured. Configure the same flags on `mmt-server` as well to simulate impaired traffic in both directions. Add them to a client to affect that client's outgoing traffic; add them to the server to affect server-to-client traffic. `--loss` accepts a rate from `0` to `1` (`0.05` means 5%). `--jitter` accepts a non-negative Go duration such as `20ms`; each outbound packet gets a random additional delay from 0 up to the configured maximum. It does not set a fixed round-trip time.
+The flags affect only outbound traffic from the configured process. Add them to a client to affect that client's outgoing packets; add them to `mmt-server` to affect server-to-client packets. Set them on both sides to impair traffic in both directions. See [Network simulation](#network-simulation) for each flag's meaning and suggested test ranges. Recreate the changed service with `docker compose up --build -d mmt-client-2` (or the server service name) to apply the configuration.
 
 ## Use the app
 
@@ -159,6 +159,27 @@ The download filename may be adjusted to avoid overwriting an existing file. Com
 
 If both storage options are provided with different non-default values, the command exits with an error. UI ports must be unique for simultaneously running agents. Keep the UI on loopback; it is designed for local access.
 
+## Network simulation
+
+Both server and UI client accept the following outbound UDP impairment flags. Rate flags use decimals from `0` to `1` (`0.05` means 5%); duration flags use non-negative Go durations such as `20ms` or `1s`. The suggested ranges below are practical test scenarios, not universal network-quality standards. Real conditions vary with baseline latency, route, Wi-Fi quality, and application needs.
+
+| Flag | What it simulates | Suggested values and example condition |
+| --- | --- | --- |
+| `--loss` | Randomly drops outbound packets. | `0`: none; `0.001–<0.01` (0.1–<1%): occasional loss on otherwise stable Wi-Fi; `0.01–<0.05` (1–<5%): congested Wi-Fi or mobile link; `0.05–0.15` (5–15%): poor/edge connection; `>0.15`: severe impairment. `1` drops every outbound packet. |
+| `--reorder` | Delays selected packets so later packets can arrive first, exercising stream reordering and recovery. | `0`: none; `0.001–<0.01`: occasional out-of-order delivery on a variable route; `0.01–<0.05`: frequent reordering on a busy or unstable path; `≥0.05`: severe stress test. |
+| `--duplicate` | Sends a second copy of selected outbound packets. | `0`: none; `0.001–<0.01`: rare duplicate datagrams; `0.01–<0.05`: noticeable duplicate traffic; `≥0.05`: abnormal-network stress test. |
+| `--corrupt` | Flips a bit in selected packets to simulate data corruption. | `0`: none; `0.001–<0.01`: rare corruption; `0.01–<0.05`: frequent integrity failures; `≥0.05`: severe stress test. This is an artificial fault-injection scenario, not a typical healthy link profile. |
+| `--delay` | Adds a fixed one-way delay to every outbound packet. | `0ms`: none; `1–<20ms`: nearby LAN or low-latency link; `20–<80ms`: ordinary regional internet path; `80–150ms`: distant route or congested connection; `>150ms`: high-latency/very distant path stress test. |
+| `--jitter` | Adds a random one-way delay from 0 up to the configured maximum to each outbound packet. | `0ms`: stable timing; `1–<10ms`: steady broadband or good Wi-Fi; `10–<30ms`: variable Wi-Fi or busy link; `30–<80ms`: unstable/congested connection; `80–150ms`: poor, highly variable path; `>150ms`: extreme impairment test. |
+
+Example client command with 10% outbound loss and up to 30 ms of extra jitter:
+
+```powershell
+go run ./cmd/client --mode ui --server 127.0.0.1:9000 --ui-port 8083 --storage storage/client3 --loss 0.10 --jitter 30ms
+```
+
+`--delay` and `--jitter` can be combined: the fixed delay is applied first, then the random jitter is added. The jitter value is a maximum, not a fixed amount (for example, `--jitter=30ms` adds 0–30 ms per packet). `--reorder` uses extra delay to exercise reordering. Start with low loss/corruption rates because they can prevent sessions from completing. Rates and non-negative durations are validated before sockets are opened.
+
 ## Tests
 
 Run all Go tests:
@@ -179,29 +200,6 @@ Run the browser state tests when Node.js is installed:
 ```powershell
 node --test web/static/js/*.test.mjs
 ```
-
-## Network simulation
-
-Both server and UI client accept outbound UDP impairment flags. Values apply independently to the process where they are set. For example, run a client with 10% outbound loss and up to 30 ms of jitter:
-
-```powershell
-go run ./cmd/client --mode ui --server 127.0.0.1:9000 --ui-port 8083 --storage storage/client3 --loss 0.10 --jitter 30ms
-```
-
-The supported options are `--loss`, `--reorder`, `--duplicate`, and `--corrupt` with rates from `0` to `1`, plus `--delay` and `--jitter` as non-negative Go durations such as `20ms`. The same flags are accepted by the server. Configure both sides to simulate impairments in both directions. Loss and corruption can prevent a session from completing, so begin with a low rate. Rates are validated before sockets are opened.
-
-Use these jitter ranges as illustrative test scenarios. The labels describe the added variation being simulated, not a universal rating of a real network; actual quality also depends on baseline latency, packet loss, route, and application needs.
-
-| `--jitter` value | Example scenario | What it simulates |
-| --- | --- | --- |
-| `0ms` | Stable link | No added packet delay variation. |
-| `1–10ms` | Very stable / good network | Small variation, similar to a steady local or well-connected link. |
-| `10–30ms` | Typical variable Wi-Fi or busy link | Noticeable timing variation while interactive chat should generally remain responsive. |
-| `30–80ms` | Unstable or congested connection | Large variation; packet arrivals may feel uneven and transfers may slow as retransmissions and buffering respond. |
-| `80–150ms` | Poor / highly unstable connection | Severe variation that can make interactive use feel laggy. |
-| `Over 150ms` | Extreme impairment test | Very large delay swings, useful for stress testing rather than representing a normal connection. |
-
-The configured value is the **maximum additional one-way delay per outbound packet**, sampled from 0 to that value. For example, `--jitter=30ms` means each packet can get 0–30 ms of extra delay; it does not mean every packet is delayed by 30 ms. Use `--delay` when you also want a fixed base delay.
 
 ## Troubleshooting
 
