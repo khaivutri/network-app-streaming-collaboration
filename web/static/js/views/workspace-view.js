@@ -70,10 +70,12 @@ export function renderWorkspace(root, snapshot, { onOpenPeer, onChanged, onRefre
     onCancel: async (id) => { await API.cancelFile(id); await onRefresh(); },
     onRetry: async (id) => { await API.retryFile(id); await onRefresh(); },
   })));
+  const composerDock = document.createElement("section");
+  composerDock.className = "composer-dock";
   const form = document.createElement("form");
-  form.className = "composer composer-dock";
+  form.className = "composer";
   const input = document.createElement("textarea");
-  input.rows = 2;
+  input.rows = 1;
   input.placeholder = "Viết tin nhắn...";
   input.value = uiState.broadcastDraft;
   input.addEventListener("input", () => { uiState.broadcastDraft = input.value; });
@@ -101,7 +103,8 @@ export function renderWorkspace(root, snapshot, { onOpenPeer, onChanged, onRefre
   const hint = document.createElement("p");
   hint.className = "composer-hint";
   hint.textContent = "Enter để gửi · Shift+Enter để xuống dòng";
-  main.append(header, messages, form, hint);
+  composerDock.append(form, hint);
+  main.append(header, messages, composerDock);
   layout.append(topbar, sidebar, main);
   root.append(layout);
 }
