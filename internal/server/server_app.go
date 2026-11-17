@@ -2,6 +2,9 @@ package server
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"net"
@@ -16,11 +19,13 @@ import (
 
 // ServerApp wires the concurrent transport, dispatcher, credentials, and presence state.
 type ServerApp struct {
-	mux       *rudp.Mux
-	router    *dispatcher.Router
-	credStore *state.CredentialStore
-	chatHdl   *handlers.ChatHandler
-	fileHdl   *handlers.FileRelayHandler
+	verifyKey  ed25519.PublicKey
+	signingKey ed25519.PrivateKey
+	mux        *rudp.Mux
+	router     *dispatcher.Router
+	credStore  *state.CredentialStore
+	chatHdl    *handlers.ChatHandler
+	fileHdl    *handlers.FileRelayHandler
 }
 
 // NewServerApp creates a Step 4 server bound to listenAddr.
@@ -30,15 +35,21 @@ func NewServerApp(listenAddr, usersPath string) (*ServerApp, error) {
 
 // NewServerAppWithNetEm creates the server with outbound UDP impairment enabled.
 func NewServerAppWithNetEm(listenAddr, usersPath string, netEm rudp.NetEmConfig) (*ServerApp, error) {
+	verifyKey, signingKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("server: generate peer signing key: %w", err)
+	}
 	credStore, err := state.LoadCredentialStore(usersPath)
 	if err != nil {
 		return nil, fmt.Errorf("server: load users: %w", err)
 	}
 	app := &ServerApp{
-		router:    dispatcher.NewRouter(),
-		credStore: credStore,
-		chatHdl:   handlers.NewChatHandler(),
-		fileHdl:   handlers.NewFileRelayHandler(),
+		verifyKey:  verifyKey,
+		signingKey: signingKey,
+		router:     dispatcher.NewRouter(),
+		credStore:  credStore,
+		chatHdl:    handlers.NewChatHandler(),
+		fileHdl:    handlers.NewFileRelayHandler(),
 	}
 	app.router.SetPanicHandler(func(sess *rudp.Session, msgType uint8, panicErr error) {
 		_ = app.sendJSON(sess, protocol.MsgError, protocol.ErrorMessagePayload{Code: protocol.ErrCodeInternalServer, Message: "Hệ thống bận, vui lòng thử lại", RefMsgType: msgType, Recoverable: true, ServerTime: time.Now().UnixMilli()})
@@ -95,7 +106,13 @@ func (app *ServerApp) handleAuth(sess *rudp.Session, _ uint8, payload []byte) er
 		})
 	}
 	now := time.Now().UnixMilli()
+	registered, _ := state.LookupTargetByUsername(user.Username)
+	claim := []byte(fmt.Sprintf("%s|%s|%d|%d", user.Username, addr.IP.String(), req.P2PPort, registered.LoginAt.UnixMilli()))
+	ticket := base64.StdEncoding.EncodeToString(ed25519.Sign(app.signingKey, claim))
+	peers = state.SetP2PMetadata(user.Username, req.P2PPort, ticket)
 	peer := protocol.PeerDTO{
+		P2PPort:     req.P2PPort,
+		PeerTicket:  ticket,
 		Username:    user.Username,
 		DisplayName: user.DisplayName,
 		IP:          addr.IP.String(),
@@ -109,14 +126,17 @@ func (app *ServerApp) handleAuth(sess *rudp.Session, _ uint8, payload []byte) er
 		Code:      protocol.AuthCodeOK,
 		Message:   "Đăng nhập thành công",
 		User: &protocol.UserInfoDTO{
+			P2PPort:     req.P2PPort,
+			PeerTicket:  ticket,
 			Username:    user.Username,
 			DisplayName: user.DisplayName,
 			IP:          addr.IP.String(),
 			Port:        addr.Port,
 			LoginAt:     now,
 		},
-		OnlinePeers: peers,
-		ServerTime:  now,
+		OnlinePeers:      peers,
+		ClusterVerifyKey: base64.StdEncoding.EncodeToString(app.verifyKey),
+		ServerTime:       now,
 	}); err != nil {
 		return err
 	}

@@ -27,6 +27,8 @@ var (
 
 // UserSession contains server-side network and presence state for one user.
 type UserSession struct {
+	P2PPort         int
+	PeerTicket      string
 	Username        string
 	DisplayName     string
 	ConnectionID    uint32
@@ -45,6 +47,8 @@ type UserSession struct {
 // sessionPeer converts internal state into a detached wire DTO.
 func sessionPeer(session *UserSession, status string) protocol.PeerDTO {
 	return protocol.PeerDTO{
+		P2PPort:     session.P2PPort,
+		PeerTicket:  session.PeerTicket,
 		Username:    session.Username,
 		DisplayName: session.DisplayName,
 		IP:          session.IP,
@@ -52,6 +56,21 @@ func sessionPeer(session *UserSession, status string) protocol.PeerDTO {
 		Status:      status,
 		LoginAt:     session.LoginAt.UnixMilli(),
 	}
+}
+
+// SetP2PPort records the advertised peer socket and updates the login snapshot.
+func SetP2PMetadata(username string, port int, ticket string) []protocol.PeerDTO {
+	GlobalUsersMu.Lock()
+	defer GlobalUsersMu.Unlock()
+	if session := GlobalOnlineUsers[username]; session != nil {
+		session.P2PPort = port
+		session.PeerTicket = ticket
+	}
+	peers := make([]protocol.PeerDTO, 0, len(GlobalOnlineUsers))
+	for _, session := range GlobalOnlineUsers {
+		peers = append(peers, sessionPeer(session, "ONLINE"))
+	}
+	return peers
 }
 
 // RegisterAuthenticatedUser atomically checks BR02 and records both indexes.
