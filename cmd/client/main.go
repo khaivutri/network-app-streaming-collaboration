@@ -34,6 +34,7 @@ func main() {
 	pass := flag.String("pass", "", "authentication password")
 	uiAddr := flag.String("ui-addr", "127.0.0.1:8081", "local HTTP UI address")
 	storageDir := flag.String("storage-dir", "storage", "local client storage directory")
+	p2pAddr := flag.String("p2p-addr", "0.0.0.0:0", "P2P UDP listener address")
 	uiPort := flag.Int("ui-port", 0, "local HTTP UI port alias (binds to 127.0.0.1)")
 	storageAlias := flag.String("storage", "", "local storage directory alias")
 	loss := flag.Float64("loss", 0, "outbound packet loss rate (0..1)")
@@ -65,7 +66,7 @@ func main() {
 	if *mode == "step9-http-ui" || *mode == "ui" {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		returnWithError(runStep9HTTPUI(ctx, *server, *uiAddr, *storageDir, *maxUploadBytes, netEm))
+		returnWithError(runStep9HTTPUI(ctx, *server, *uiAddr, *storageDir, *p2pAddr, *maxUploadBytes, netEm))
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
@@ -137,7 +138,7 @@ func main() {
 	fmt.Printf("Mode: %s\nLocalAddr -> ServerAddr: %s -> %s\nAssigned ConnectionID: 0x%08X (%d)\nServer Acknowledgment Message: %s\nRound-Trip Time (RTT): %d ms / %d µs\nFinal State: CONNECTED -> Gracefully Closed (FIN/FIN-ACK)\n", *mode, r.LocalAddr, r.ServerAddr, r.ConnectionID, r.ConnectionID, r.WelcomeMsg, r.RTTMillis, r.RTTMicros)
 }
 
-func runStep9HTTPUI(ctx context.Context, serverAddr, uiAddr, storageDir string, maxUploadBytes int64, netEm rudp.NetEmConfig) error {
+func runStep9HTTPUI(ctx context.Context, serverAddr, uiAddr, storageDir, p2pAddr string, maxUploadBytes int64, netEm rudp.NetEmConfig) error {
 	app := client.NewClientApp(client.AppConfig{
 		ServerAddr:       serverAddr,
 		StagingDir:       filepath.Join(storageDir, "staging"),
@@ -145,6 +146,7 @@ func runStep9HTTPUI(ctx context.Context, serverAddr, uiAddr, storageDir string, 
 		HandshakeTimeout: 5 * time.Second,
 		RequestTimeout:   5 * time.Second,
 		NetEm:            netEm,
+		P2PListenAddr:    p2pAddr,
 	})
 	bridge, err := webbridge.NewServer(app, webbridge.Config{
 		ListenAddr:     uiAddr,
