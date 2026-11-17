@@ -38,6 +38,8 @@ type ChatClient struct {
 	cipher            *security.SessionCipher
 	eventBus          *events.Bus
 	progressPublished map[string]time.Time
+	stagingDir        string
+	downloadDir       string
 }
 
 // SetCipher enables directional encryption for chat and file traffic.
@@ -80,6 +82,8 @@ func NewChatClientWithStorage(conn rudp.PacketConn, server *net.UDPAddr, connect
 		progressPublished: make(map[string]time.Time),
 		rto:               rudp.NewAdaptiveRTO(rudp.DefaultRTOConfig()),
 		lastServerActive:  time.Now(),
+		stagingDir:        stagingDir,
+		downloadDir:       downloadDir,
 	}
 }
 
@@ -360,12 +364,18 @@ func (c *ChatClient) Listen(ctx context.Context) (err error) {
 				return fmt.Errorf("chat client: set read deadline: %w", setErr)
 			}
 		} else {
-			_ = c.conn.SetReadDeadline(time.Time{})
+			_ = c.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 		}
 		n, _, readErr := c.conn.ReadFromUDP(buffer)
 		if readErr != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
+			}
+			if netErr, ok := readErr.(net.Error); ok && netErr.Timeout() {
+				if time.Since(c.LastServerActive()) > 9*time.Second {
+					return fmt.Errorf("chat client: server heartbeat timed out")
+				}
+				continue
 			}
 			return fmt.Errorf("chat client: read packet: %w", readErr)
 		}
@@ -592,7 +602,7 @@ func (c *ChatClient) handleFileInit(packet *protocol.Packet) {
 		return
 	}
 	fmt.Printf("\n[File Incoming] Nhận yêu cầu gửi file '%s' (%d bytes) từ '%s'...\n", initPayload.FileName, initPayload.FileSize, initPayload.Sender)
-	downloader, err := transfer.NewDownloader(filepath.Join("storage", "staging"), filepath.Join("storage", "downloads"), &initPayload)
+	downloader, err := transfer.NewDownloader(c.stagingDir, c.downloadDir, &initPayload)
 	response := protocol.FileResponsePayload{
 		TransferID: initPayload.TransferID,
 		Accepted:   err == nil,
@@ -604,7 +614,7 @@ func (c *ChatClient) handleFileInit(packet *protocol.Packet) {
 		response.Message = err.Error()
 		fmt.Printf("[File Error] Không thể tạo file tạm: %v\n", err)
 	} else {
-		c.resetStream(packet.Hdr.StreamID)
+		c.getStream(packet.Hdr.StreamID).ResetRecv()
 		c.transferMgr.RegisterDownloader(initPayload.TransferID, downloader)
 		c.setProgressBar(initPayload.TransferID, transfer.NewProgressBar("Download "+initPayload.FileName, initPayload.FileSize))
 		c.updateProgress(&transfer.TransferProgress{
@@ -652,7 +662,8 @@ func (c *ChatClient) handleFileResponse(packet *protocol.Packet) {
 	}
 	fmt.Printf("\n[File Transfer] Người nhận đã chấp nhận! Đang truyền các khối dữ liệu (chunks)...\n")
 	c.updateProgress(&transfer.TransferProgress{TransferID: response.TransferID, UpdatedAt: time.Now().UnixMilli(), State: "TRANSFERRING"})
-	stream := c.resetStream(packet.Hdr.StreamID)
+	stream := c.getStream(packet.Hdr.StreamID)
+	stream.ResetSend()
 	go func() {
 		progressBar := c.getProgressBar(response.TransferID)
 		var transferredBytes int64

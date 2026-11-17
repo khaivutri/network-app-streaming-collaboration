@@ -9,10 +9,11 @@ import (
 
 // ReconnectConfig controls retry timing and attempt limits.
 type ReconnectConfig struct {
-	InitialInterval time.Duration
-	MaxInterval     time.Duration
-	Multiplier      float64
-	MaxAttempts     int
+	InitialInterval          time.Duration
+	MaxInterval              time.Duration
+	Multiplier               float64
+	MaxAttempts              int
+	PreserveSessionOnFailure bool
 }
 
 // ReconnectManager performs cancellable exponential-backoff recovery.
@@ -40,17 +41,21 @@ func NewReconnectManager(store *state.ClientStore, cfg ReconnectConfig) *Reconne
 
 // Start retries reconnectFn until success, cancellation, or the attempt limit.
 func (m *ReconnectManager) Start(ctx context.Context, reconnectFn func() error) error {
-	m.store.SetConnectionState(state.ConnStateReconnecting)
+	if !m.cfg.PreserveSessionOnFailure {
+		m.store.SetConnectionState(state.ConnStateReconnecting)
+	}
 	interval := m.cfg.InitialInterval
 	var lastErr error
-	for attempt := 0; attempt < m.cfg.MaxAttempts; attempt++ {
+	for attempt := 0; m.cfg.PreserveSessionOnFailure || attempt < m.cfg.MaxAttempts; attempt++ {
 		timer := time.NewTimer(interval)
 		select {
 		case <-ctx.Done():
 			if !timer.Stop() {
 				<-timer.C
 			}
-			m.store.ClearSession()
+			if !m.cfg.PreserveSessionOnFailure {
+				m.store.ClearSession()
+			}
 			return ctx.Err()
 		case <-timer.C:
 		}

@@ -34,7 +34,11 @@ func dialPersistentSession(ctx context.Context, serverAddr string, timeout time.
 	if err != nil {
 		return nil, fmt.Errorf("client session: resolve server: %w", err)
 	}
-	conn, err := net.ListenUDP("udp", nil)
+	network := "udp"
+	if server.IP.To4() != nil {
+		network = "udp4"
+	}
+	conn, err := net.ListenUDP(network, nil)
 	if err != nil {
 		return nil, fmt.Errorf("client session: bind socket: %w", err)
 	}
@@ -97,7 +101,7 @@ func dialPersistentSession(ctx context.Context, serverAddr string, timeout time.
 			}
 			return closeOnError(fmt.Errorf("client session: receive SYN-ACK: %w", readErr))
 		}
-		if remote == nil || remote.String() != server.String() {
+		if remote == nil || !remote.IP.Equal(server.IP) || remote.Port != server.Port {
 			continue
 		}
 		candidate, parseErr := protocol.UnmarshalPacket(buffer[:n])

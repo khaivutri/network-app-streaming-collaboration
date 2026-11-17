@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/khaivutri/network-app-streaming-collaboration/internal/client/events"
@@ -41,6 +42,8 @@ type AppConfig struct {
 	HandshakeTimeout time.Duration
 	RequestTimeout   time.Duration
 	NetEm            rudp.NetEmConfig
+	P2PListenAddr    string
+	DisableP2P       bool
 }
 
 // SessionSnapshot is the minimal network-facing result returned by login.
@@ -63,6 +66,7 @@ type ClientApp struct {
 	cipher          *security.SessionCipher
 	auth            *AuthClient
 	chat            *ChatClient
+	peerMesh        atomic.Pointer[PeerMesh]
 	sessionCtx      context.Context
 	sessionCancel   context.CancelFunc
 	listenerDone    chan struct{}
@@ -71,7 +75,7 @@ type ClientApp struct {
 	reconnectCancel context.CancelFunc
 	username        string
 	password        string
-	closed          bool
+	closed          atomic.Bool
 }
 
 // NewClientApp creates an unauthenticated local client facade.
@@ -96,19 +100,33 @@ func (a *ClientApp) Events() *events.Bus { return a.eventBus }
 func (a *ClientApp) Login(ctx context.Context, username, password string) (SessionSnapshot, error) {
 	a.lifecycleMu.Lock()
 	defer a.lifecycleMu.Unlock()
-	if a.closed {
+	if a.closed.Load() {
 		return SessionSnapshot{}, fmt.Errorf("client app: %w", context.Canceled)
 	}
 	if a.chat != nil || a.store.IsLoggedIn() {
 		return SessionSnapshot{}, ErrClientAlreadyAuthenticated
 	}
+	if !a.config.DisableP2P {
+		mesh, meshErr := NewPeerMesh(a.config.P2PListenAddr, a.config.StagingDir, a.config.DownloadDir, a.store, a.eventBus)
+		if meshErr != nil {
+			return SessionSnapshot{}, meshErr
+		}
+		a.peerMesh.Store(mesh)
+	}
 	session, err := dialPersistentSession(ctx, a.config.ServerAddr, a.config.HandshakeTimeout, a.config.NetEm)
 	if err != nil {
+		if a.peerMesh.Load() != nil {
+			_ = a.peerMesh.Load().Shutdown(context.Background())
+			a.peerMesh.Store(nil)
+		}
 		return SessionSnapshot{}, err
 	}
 	store := a.store
 	auth := NewAuthClient(session.Conn, session.Server, session.ConnectionID, store)
 	auth.SetCipher(session.Cipher)
+	if a.peerMesh.Load() != nil {
+		auth.SetP2PPort(a.peerMesh.Load().P2PPort())
+	}
 	loginCtx := ctx
 	if _, ok := ctx.Deadline(); !ok && a.config.RequestTimeout > 0 {
 		var cancel context.CancelFunc
@@ -118,10 +136,18 @@ func (a *ClientApp) Login(ctx context.Context, username, password string) (Sessi
 	response, err := auth.Login(loginCtx, username, password)
 	if err != nil {
 		_ = session.Conn.Close()
+		if a.peerMesh.Load() != nil {
+			_ = a.peerMesh.Load().Shutdown(context.Background())
+			a.peerMesh.Store(nil)
+		}
 		return SessionSnapshot{}, err
 	}
 	if !response.Success {
 		_ = session.Conn.Close()
+		if a.peerMesh.Load() != nil {
+			_ = a.peerMesh.Load().Shutdown(context.Background())
+			a.peerMesh.Store(nil)
+		}
 		return SessionSnapshot{}, &AuthError{
 			Code:    response.Code,
 			Message: response.Message,
@@ -141,9 +167,31 @@ func (a *ClientApp) Login(ctx context.Context, username, password string) (Sessi
 	a.password = password
 	a.listenerDone = make(chan struct{})
 	store.SetConnectionState(state.ConnStateConnected)
+	a.eventBus.Publish("connection.status", map[string]any{
+		"state": string(state.ConnStateConnected),
+	})
 	go a.runListener(chat, a.sessionCtx, a.listenerDone)
 	chat.StartHeartbeat(a.sessionCtx, 3*time.Second)
+	if a.peerMesh.Load() != nil {
+		a.peerMesh.Load().SetIdentity(username, response.User.PeerTicket, response.ClusterVerifyKey)
+		a.peerMesh.Load().SyncPeers(response.OnlinePeers)
+		go a.syncPeerLoop(a.sessionCtx, a.peerMesh.Load())
+	}
 	return a.Snapshot(), nil
+}
+
+// syncPeerLoop picks up JOIN updates delivered by the server listener.
+func (a *ClientApp) syncPeerLoop(ctx context.Context, mesh *PeerMesh) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			mesh.SyncPeers(a.store.GetOnlinePeers())
+		}
+	}
 }
 
 // Snapshot returns a detached current session summary for HTTP bootstrap.
@@ -161,11 +209,19 @@ func (a *ClientApp) Logout(ctx context.Context) error {
 	a.lifecycleMu.Lock()
 	defer a.lifecycleMu.Unlock()
 	if a.chat == nil {
+		if a.peerMesh.Load() != nil {
+			_ = a.peerMesh.Load().Shutdown(ctx)
+			a.peerMesh.Store(nil)
+		}
 		a.store.ClearSession()
 		return nil
 	}
 	username := a.username
 	chat := a.chat
+	if a.peerMesh.Load() != nil {
+		_ = a.peerMesh.Load().Shutdown(ctx)
+		a.peerMesh.Store(nil)
+	}
 	if username != "" {
 		// Logout is best effort: UC02 requires local cleanup even when the server is unreachable.
 		_ = chat.SendLogout(username)
@@ -206,6 +262,14 @@ func (a *ClientApp) Logout(ctx context.Context) error {
 
 // SendBroadcast enqueues one room message using the caller's correlation ID.
 func (a *ClientApp) SendBroadcast(ctx context.Context, clientMsgID, content string) error {
+	if mesh := a.peerMesh.Load(); mesh != nil && a.store.IsLoggedIn() {
+		if err := mesh.SendBroadcast(ctx, clientMsgID, content); err != nil {
+			return err
+		}
+		if a.store.ConnectionState() != state.ConnStateConnected {
+			return nil
+		}
+	}
 	chat, err := a.currentChat()
 	if err != nil {
 		return err
@@ -215,6 +279,14 @@ func (a *ClientApp) SendBroadcast(ctx context.Context, clientMsgID, content stri
 
 // SendDirect enqueues one direct message using the caller's correlation ID.
 func (a *ClientApp) SendDirect(ctx context.Context, clientMsgID, recipient, content string) error {
+	if peer, ok := a.store.GetPeer(recipient); ok && peer.P2PPort > 0 {
+		if mesh := a.peerMesh.Load(); mesh != nil {
+			return mesh.SendDirect(ctx, clientMsgID, recipient, content)
+		}
+	}
+	if a.store.ConnectionState() != state.ConnStateConnected {
+		return fmt.Errorf("client app: server unavailable")
+	}
 	chat, err := a.currentChat()
 	if err != nil {
 		return err
@@ -229,6 +301,14 @@ func (a *ClientApp) SendFile(ctx context.Context, recipient, filePath, caption s
 
 // SendFileNamed starts one upload while preserving a browser-selected display name.
 func (a *ClientApp) SendFileNamed(ctx context.Context, recipient, filePath, displayName, caption string) (string, error) {
+	if peer, ok := a.store.GetPeer(recipient); ok && peer.P2PPort > 0 {
+		if mesh := a.peerMesh.Load(); mesh != nil {
+			return mesh.SendFileNamed(ctx, recipient, filePath, displayName, caption)
+		}
+	}
+	if a.store.ConnectionState() != state.ConnStateConnected {
+		return "", fmt.Errorf("client app: server unavailable")
+	}
 	chat, err := a.currentChat()
 	if err != nil {
 		return "", err
@@ -238,6 +318,13 @@ func (a *ClientApp) SendFileNamed(ctx context.Context, recipient, filePath, disp
 
 // CancelTransfer cancels one active transfer and removes partial state.
 func (a *ClientApp) CancelTransfer(ctx context.Context, transferID string) error {
+	if mesh := a.peerMesh.Load(); mesh != nil {
+		if progress, ok := a.store.GetFileProgress(transferID); ok && progress.Peer != "" {
+			if peer, exists := a.store.GetPeer(progress.Peer); exists && peer.P2PPort > 0 {
+				return mesh.CancelTransfer(ctx, transferID)
+			}
+		}
+	}
 	chat, err := a.currentChat()
 	if err != nil {
 		return err
@@ -247,6 +334,9 @@ func (a *ClientApp) CancelTransfer(ctx context.Context, transferID string) error
 
 // RefreshPeers asks the authenticated server for a fresh presence snapshot.
 func (a *ClientApp) RefreshPeers(ctx context.Context) error {
+	if a.store.ConnectionState() == state.ConnStateP2POnly {
+		return nil
+	}
 	chat, err := a.currentChat()
 	if err != nil {
 		return err
@@ -274,11 +364,11 @@ func (a *ClientApp) OpenCompletedFile(transferID string) (*os.File, transfer.Tra
 // Shutdown stops the session and event bus, making subsequent use invalid.
 func (a *ClientApp) Shutdown(ctx context.Context) error {
 	a.lifecycleMu.Lock()
-	if a.closed {
+	if a.closed.Load() {
 		a.lifecycleMu.Unlock()
 		return nil
 	}
-	a.closed = true
+	a.closed.Store(true)
 	a.lifecycleMu.Unlock()
 	if err := a.Logout(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		return err
@@ -299,10 +389,14 @@ func (a *ClientApp) currentChat() (*ChatClient, error) {
 func (a *ClientApp) runListener(chat *ChatClient, ctx context.Context, done chan struct{}) {
 	defer close(done)
 	if err := chat.Listen(ctx); err != nil && ctx.Err() == nil {
-		a.store.SetConnectionState(state.ConnStateReconnecting)
+		connectionState := state.ConnStateReconnecting
+		if a.peerMesh.Load() != nil {
+			connectionState = state.ConnStateP2POnly
+		}
+		a.store.SetConnectionState(connectionState)
 		a.eventBus.Publish("connection.status", map[string]any{
-			"state":   string(state.ConnStateReconnecting),
-			"message": "Mất kết nối. Một số tính năng không khả dụng.",
+			"state":   string(connectionState),
+			"message": "Máy chủ tạm ngưng · Đang kết nối trực tiếp P2P.",
 		})
 		a.startReconnect()
 	}
@@ -310,7 +404,7 @@ func (a *ClientApp) runListener(chat *ChatClient, ctx context.Context, done chan
 
 func (a *ClientApp) startReconnect() {
 	a.reconnectMu.Lock()
-	if a.reconnecting || a.closed {
+	if a.reconnecting || a.closed.Load() {
 		a.reconnectMu.Unlock()
 		return
 	}
@@ -320,10 +414,11 @@ func (a *ClientApp) startReconnect() {
 	a.reconnectMu.Unlock()
 	go func() {
 		manager := NewReconnectManager(a.store, ReconnectConfig{
-			InitialInterval: time.Second,
-			MaxInterval:     16 * time.Second,
-			Multiplier:      2,
-			MaxAttempts:     5,
+			InitialInterval:          time.Second,
+			MaxInterval:              10 * time.Second,
+			Multiplier:               2,
+			MaxAttempts:              5,
+			PreserveSessionOnFailure: a.peerMesh.Load() != nil,
 		})
 		_ = manager.Start(ctx, a.reconnectOnce)
 		a.reconnectMu.Lock()
@@ -336,7 +431,7 @@ func (a *ClientApp) startReconnect() {
 func (a *ClientApp) reconnectOnce() error {
 	a.lifecycleMu.Lock()
 	defer a.lifecycleMu.Unlock()
-	if a.closed || a.username == "" {
+	if a.closed.Load() || a.username == "" {
 		return ErrClientNotAuthenticated
 	}
 	if a.conn != nil {
@@ -351,6 +446,10 @@ func (a *ClientApp) reconnectOnce() error {
 	store := a.store
 	auth := NewAuthClient(session.Conn, session.Server, session.ConnectionID, store)
 	auth.SetCipher(session.Cipher)
+	if a.peerMesh.Load() != nil {
+		auth.SetP2PPort(a.peerMesh.Load().P2PPort())
+		auth.PreserveState()
+	}
 	response, err := auth.Login(ctx, a.username, a.password)
 	if err != nil {
 		_ = session.Conn.Close()
@@ -377,9 +476,21 @@ func (a *ClientApp) reconnectOnce() error {
 	a.auth = auth
 	a.chat = chat
 	a.listenerDone = make(chan struct{})
-	store.SetLoginSuccess(response.User, response.OnlinePeers)
+	if a.peerMesh.Load() != nil {
+		store.SyncServerSession(response.User, response.OnlinePeers)
+		a.peerMesh.Load().SetIdentity(a.username, response.User.PeerTicket, response.ClusterVerifyKey)
+		a.peerMesh.Load().SyncPeers(response.OnlinePeers)
+	} else {
+		store.SetLoginSuccess(response.User, response.OnlinePeers)
+	}
 	store.SetConnectionState(state.ConnStateConnected)
+	a.eventBus.Publish("connection.status", map[string]any{
+		"state": string(state.ConnStateConnected),
+	})
 	go a.runListener(chat, a.sessionCtx, a.listenerDone)
 	chat.StartHeartbeat(a.sessionCtx, 3*time.Second)
+	if mesh := a.peerMesh.Load(); mesh != nil {
+		go a.syncPeerLoop(a.sessionCtx, mesh)
+	}
 	return nil
 }

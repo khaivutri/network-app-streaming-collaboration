@@ -14,15 +14,23 @@ import (
 
 // AuthClient owns the UDP request/response flow for one connection.
 type AuthClient struct {
-	conn         rudp.PacketConn
-	server       *net.UDPAddr
-	connectionID uint32
-	store        *state.ClientStore
-	cipher       *security.SessionCipher
+	conn          rudp.PacketConn
+	server        *net.UDPAddr
+	connectionID  uint32
+	store         *state.ClientStore
+	cipher        *security.SessionCipher
+	p2pPort       int
+	preserveState bool
 }
 
 // SetCipher enables directional payload encryption for authentication traffic.
 func (c *AuthClient) SetCipher(cipher *security.SessionCipher) { c.cipher = cipher }
+
+// SetP2PPort advertises the separate peer listener during login.
+func (c *AuthClient) SetP2PPort(port int) { c.p2pPort = port }
+
+// PreserveState keeps local history while a server session is renewed.
+func (c *AuthClient) PreserveState() { c.preserveState = true }
 
 // NewAuthClient binds a client socket to a server endpoint and connection ID.
 func NewAuthClient(conn rudp.PacketConn, server *net.UDPAddr, connectionID uint32, store *state.ClientStore) *AuthClient {
@@ -33,6 +41,7 @@ func NewAuthClient(conn rudp.PacketConn, server *net.UDPAddr, connectionID uint3
 func (c *AuthClient) Login(ctx context.Context, username, password string) (protocol.AuthResponsePayload, error) {
 	requestID := fmt.Sprintf("auth-%d", time.Now().UnixNano())
 	err := c.send(ctx, protocol.MsgAuthRequest, protocol.AuthRequestPayload{
+		P2PPort:       c.p2pPort,
 		RequestID:     requestID,
 		Username:      username,
 		Password:      password,
@@ -51,7 +60,11 @@ func (c *AuthClient) Login(ctx context.Context, username, password string) (prot
 		return protocol.AuthResponsePayload{}, err
 	}
 	if resp.Success {
-		c.store.SetLoginSuccess(resp.User, resp.OnlinePeers)
+		if c.preserveState {
+			c.store.SyncServerSession(resp.User, resp.OnlinePeers)
+		} else {
+			c.store.SetLoginSuccess(resp.User, resp.OnlinePeers)
+		}
 	}
 	return resp, nil
 }

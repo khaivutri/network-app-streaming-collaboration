@@ -14,6 +14,7 @@ const (
 	ConnStateConnected    ConnectionState = "CONNECTED"
 	ConnStateReconnecting ConnectionState = "RECONNECTING"
 	ConnStateDisconnected ConnectionState = "DISCONNECTED"
+	ConnStateP2POnly      ConnectionState = "P2P_ONLY"
 )
 
 // ClientStore is the concurrency-safe local projection of server presence.
@@ -95,6 +96,39 @@ func (cs *ClientStore) SetLoginSuccess(user *protocol.UserInfoDTO, peers []proto
 	clear(cs.completedPaths)
 	for _, peer := range peers {
 		cs.onlinePeers[peer.Username] = peer
+	}
+}
+
+// SyncServerSession refreshes auth and presence without deleting local history.
+func (cs *ClientStore) SyncServerSession(user *protocol.UserInfoDTO, peers []protocol.PeerDTO) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cs.isLoggedIn = true
+	if user != nil {
+		copy := *user
+		cs.currentUser = &copy
+	}
+	for _, peer := range peers {
+		cs.onlinePeers[peer.Username] = peer
+	}
+}
+
+// GetPeer returns a detached peer entry.
+func (cs *ClientStore) GetPeer(username string) (protocol.PeerDTO, bool) {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	peer, ok := cs.onlinePeers[username]
+	return peer, ok
+}
+
+// UpdatePeerStatus changes one known peer's presence under the store lock.
+func (cs *ClientStore) UpdatePeerStatus(username, status string) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	peer, ok := cs.onlinePeers[username]
+	if ok {
+		peer.Status = status
+		cs.onlinePeers[username] = peer
 	}
 }
 
@@ -194,6 +228,11 @@ func (cs *ClientStore) GetOnlinePeers() []protocol.PeerDTO {
 func (cs *ClientStore) AppendBroadcastMessage(message protocol.BroadcastMessageServerPayload) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
+	for _, existing := range cs.bcastMessages {
+		if message.ClientMsgID != "" && existing.ClientMsgID == message.ClientMsgID && existing.Sender == message.Sender {
+			return
+		}
+	}
 	cs.bcastMessages = append(cs.bcastMessages, message)
 	if message.ClientMsgID != "" && message.Sender != "" {
 		cs.deliveryStatus[message.ClientMsgID] = "DELIVERED"
@@ -207,6 +246,11 @@ func (cs *ClientStore) AppendDirectMessage(message protocol.UnicastMessageServer
 	peer := message.Sender
 	if current := cs.currentUser; current != nil && message.Sender == current.Username {
 		peer = message.Recipient
+	}
+	for _, existing := range cs.directMessages[peer] {
+		if message.ClientMsgID != "" && existing.ClientMsgID == message.ClientMsgID && existing.Sender == message.Sender {
+			return
+		}
 	}
 	cs.directMessages[peer] = append(cs.directMessages[peer], message)
 	if message.ClientMsgID != "" {
