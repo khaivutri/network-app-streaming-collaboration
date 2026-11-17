@@ -51,6 +51,9 @@ const (
 	MsgPong               uint8 = 0x52
 	MsgWindowUpdate       uint8 = 0x53
 	MsgError              uint8 = 0x54
+	MsgPeerHello          uint8 = 0x60
+	MsgPeerHelloAck       uint8 = 0x61
+	MsgPeerBye            uint8 = 0x62
 )
 
 // FormatFlags returns a stable human-readable representation of a flag mask.
@@ -72,7 +75,7 @@ func FormatFlags(flags uint8) string {
 
 // MsgTypeName returns a readable name for a message type.
 func MsgTypeName(msgType uint8) string {
-	names := map[uint8]string{MsgCtrlHandshake: "CTRL_HANDSHAKE", MsgAuthRequest: "AUTH_REQUEST", MsgAuthResponse: "AUTH_RESPONSE", MsgLogout: "LOGOUT", MsgLogoutResponse: "LOGOUT_RESPONSE", MsgDiscoPeers: "DISCO_PEERS", MsgDiscoPeersResponse: "DISCO_PEERS_RESPONSE", MsgDiscoUpdate: "DISCO_UPDATE", MsgMessBroadcast: "MESS_BROADCAST", MsgMessUnicast: "MESS_UNICAST", MsgMessDelivered: "MESS_DELIVERED", MsgFileInit: "FILE_INIT", MsgFileResponse: "FILE_RESPONSE", MsgFileChunk: "FILE_CHUNK", MsgFileComplete: "FILE_COMPLETE", MsgFileCancel: "FILE_CANCEL", MsgAck: "ACK", MsgPing: "PING", MsgPong: "PONG", MsgWindowUpdate: "WINDOW_UPDATE", MsgError: "ERROR"}
+	names := map[uint8]string{MsgCtrlHandshake: "CTRL_HANDSHAKE", MsgAuthRequest: "AUTH_REQUEST", MsgAuthResponse: "AUTH_RESPONSE", MsgLogout: "LOGOUT", MsgLogoutResponse: "LOGOUT_RESPONSE", MsgDiscoPeers: "DISCO_PEERS", MsgDiscoPeersResponse: "DISCO_PEERS_RESPONSE", MsgDiscoUpdate: "DISCO_UPDATE", MsgMessBroadcast: "MESS_BROADCAST", MsgMessUnicast: "MESS_UNICAST", MsgMessDelivered: "MESS_DELIVERED", MsgFileInit: "FILE_INIT", MsgFileResponse: "FILE_RESPONSE", MsgFileChunk: "FILE_CHUNK", MsgFileComplete: "FILE_COMPLETE", MsgFileCancel: "FILE_CANCEL", MsgAck: "ACK", MsgPing: "PING", MsgPong: "PONG", MsgWindowUpdate: "WINDOW_UPDATE", MsgError: "ERROR", MsgPeerHello: "PEER_HELLO", MsgPeerHelloAck: "PEER_HELLO_ACK", MsgPeerBye: "PEER_BYE"}
 	if name, ok := names[msgType]; ok {
 		return name
 	}
