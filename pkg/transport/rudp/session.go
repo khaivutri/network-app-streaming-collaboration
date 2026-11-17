@@ -184,6 +184,36 @@ func (s *Session) GetStream(streamID uint8) *Stream {
 	return stream
 }
 
+// StreamsSnapshot returns the current streams for a retransmission worker.
+func (s *Session) StreamsSnapshot() []*Stream {
+	s.streamsMu.RLock()
+	defer s.streamsMu.RUnlock()
+	streams := make([]*Stream, 0, len(s.streams))
+	for _, stream := range s.streams {
+		streams = append(streams, stream)
+	}
+	return streams
+}
+
+// RetransmitSegment reseals a packet so the peer accepts a fresh AEAD nonce.
+func (s *Session) RetransmitSegment(segment *SentSegment) error {
+	if segment == nil || segment.Packet == nil {
+		return fmt.Errorf("rudp: nil retransmission segment")
+	}
+	raw := segment.Raw
+	if cipher := s.Cipher(); cipher != nil {
+		var err error
+		raw, err = cipher.EncryptPacket(segment.Packet.Hdr, segment.Packet.Payload)
+		if err != nil {
+			return err
+		}
+	}
+	if !s.EnqueueOutbound(raw) {
+		return fmt.Errorf("rudp: retransmission queue full")
+	}
+	return nil
+}
+
 // SendReliable assigns a per-stream sequence number and queues a reliable packet.
 func (s *Session) SendReliable(streamID uint8, msgType uint8, payload []byte) error {
 	stream := s.GetStream(streamID)
@@ -237,7 +267,13 @@ func (s *Session) SendAck(streamID uint8) error {
 			WindowSize:   window,
 		},
 	}
-	raw, err := protocol.MarshalPacket(pkt)
+	var raw []byte
+	var err error
+	if cipher := s.Cipher(); cipher != nil {
+		raw, err = cipher.EncryptPacket(pkt.Hdr, nil)
+	} else {
+		raw, err = protocol.MarshalPacket(pkt)
+	}
 	if err != nil {
 		return fmt.Errorf("rudp: marshal ACK: %w", err)
 	}

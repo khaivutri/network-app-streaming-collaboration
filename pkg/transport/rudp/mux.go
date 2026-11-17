@@ -27,6 +27,7 @@ var (
 
 // MuxConfig configures the UDP reactor.
 type MuxConfig struct {
+	DirectEndpoint     bool
 	ListenAddr         string
 	SocketReadBuffer   int
 	SocketWriteBuffer  int
@@ -250,7 +251,9 @@ func (m *Mux) dispatch(raw []byte, addr *net.UDPAddr) {
 	if !ok {
 		return
 	}
-	sess.UpdateRemoteAddr(addr)
+	if m.cfg.DirectEndpoint && sess.Cipher() != nil && !pkt.Hdr.HasFlag(protocol.FlagENC) {
+		return
+	}
 	if cipher := sess.Cipher(); cipher != nil && !pkt.Hdr.HasFlag(protocol.FlagENC) {
 		plaintextControl := pkt.Hdr.MsgType == protocol.MsgAck && len(pkt.Payload) == 0
 		if !plaintextControl {
@@ -269,6 +272,7 @@ func (m *Mux) dispatch(raw []byte, addr *net.UDPAddr) {
 		}
 		pkt.Payload = plaintext
 	}
+	sess.UpdateRemoteAddr(addr)
 	if pkt.Hdr.HasFlag(protocol.FlagFIN) {
 		m.CloseSession(pkt.Hdr.ConnectionID, "CLIENT_FIN")
 		return
@@ -358,7 +362,12 @@ func (m *Mux) startSession(sess *Session) {
 func (m *Mux) processSessionPacket(sess *Session, pkt *protocol.Packet) {
 	stream := sess.GetStream(pkt.Hdr.StreamID)
 	if pkt.Hdr.HasFlag(protocol.FlagACK) || pkt.Hdr.MsgType == protocol.MsgAck {
-		stream.ProcessAck(pkt.Hdr.AckNum, pkt.Hdr.AckBitmap, pkt.Hdr.WindowSize)
+		_, fastRetransmit := stream.ProcessAck(pkt.Hdr.AckNum, pkt.Hdr.AckBitmap, pkt.Hdr.WindowSize)
+		if m.cfg.DirectEndpoint {
+			for _, segment := range fastRetransmit {
+				_ = sess.RetransmitSegment(segment)
+			}
+		}
 	}
 	if pkt.Hdr.MsgType == protocol.MsgAck {
 		if ackHandler, ok := m.handler.(AckHandler); ok {
@@ -368,14 +377,14 @@ func (m *Mux) processSessionPacket(sess *Session, pkt *protocol.Packet) {
 	}
 	// Sequence zero is retained for the pre-Step-5 auth/presence wire messages,
 	// and MsgFileChunk is relayed end-to-end so receiver SACK state drives retransmission.
-	if !pkt.Hdr.HasFlag(protocol.FlagREL) || pkt.Hdr.SeqNum == 0 || pkt.Hdr.MsgType == protocol.MsgFileChunk {
+	if !pkt.Hdr.HasFlag(protocol.FlagREL) || pkt.Hdr.SeqNum == 0 || (pkt.Hdr.MsgType == protocol.MsgFileChunk && !m.cfg.DirectEndpoint) {
 		if m.handler != nil {
 			safeMessage(m.handler, sess, pkt.Hdr.StreamID, pkt.Hdr.MsgType, pkt.Payload)
 		}
 		return
 	}
 	delivered, needAck := stream.ProcessIncomingPacket(pkt)
-	if needAck {
+	if needAck || m.cfg.DirectEndpoint {
 		if err := sess.SendAck(pkt.Hdr.StreamID); err != nil {
 			slog.Debug("rudp ACK enqueue failed", "conn_id", sess.ID(), "error", err)
 		}

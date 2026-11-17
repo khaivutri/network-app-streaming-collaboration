@@ -58,6 +58,23 @@ func (s *Stream) NextSeqNum() uint32 {
 	return seq
 }
 
+// ResetSend starts a fresh send sequence without changing receive ordering.
+func (s *Stream) ResetSend() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nextSendSeq = 1
+	s.highestSentSeq = 0
+	s.sendBuffer = make(map[uint32]*SentSegment)
+}
+
+// ResetRecv starts a fresh receive sequence without changing outgoing packets.
+func (s *Stream) ResetRecv() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.expectedRecvSeq = 1
+	s.reorderBuf = make(map[uint32]*protocol.Packet)
+}
+
 // RecordSent retains a reliable packet for retransmission.
 func (s *Stream) RecordSent(pkt *protocol.Packet, raw []byte) {
 	if pkt == nil {
