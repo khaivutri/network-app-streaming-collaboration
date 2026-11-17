@@ -24,6 +24,7 @@ A Go based collaboration app with a reliable UDP transport, authenticated and en
 - Relayed file transfer with progress, cancellation, and local downloads.
 - A self-contained browser UI served by a loopback-only HTTP agent. The UI uses REST and Server-Sent Events.
 - Multiple client agents on one computer, each with a separate browser port and storage directory.
+- Direct encrypted P2P chat and file transfer continue between discovered clients when the central server stops.
 
 ## Requirements
 
@@ -60,16 +61,16 @@ Open [http://127.0.0.1:8081](http://127.0.0.1:8081) and sign in with the `hung.v
 
 ## Run multiple clients
 
-Run one server and one client agent per terminal. Each client needs its own UI port and storage directory. Use a different demo account in each browser window because an account can have only one active session.
+Run one server and one client agent per terminal. Each client needs its own UI port, P2P UDP port, and storage directory. Use a different demo account in each browser window because an account can have only one active session. The fixed P2P ports below make the clients reachable after the server is stopped.
 
 | Terminal | Command | Browser address | Demo user |
 | --- | --- | --- | --- |
 | 1 — Server | `go run ./cmd/server --mode full --addr 127.0.0.1:9000 --users configs/users.json` | — | — |
-| 2 — Client 1 | `go run ./cmd/client --mode ui --server 127.0.0.1:9000 --ui-port 8081 --storage storage/client1` | `http://127.0.0.1:8081` | `hung.vo` |
-| 3 — Client 2 | `go run ./cmd/client --mode ui --server 127.0.0.1:9000 --ui-port 8082 --storage storage/client2` | `http://127.0.0.1:8082` | `Alice` |
-| 4 — Client 3 | `go run ./cmd/client --mode ui --server 127.0.0.1:9000 --ui-port 8083 --storage storage/client3` | `http://127.0.0.1:8083` | `Bob` |
+| 2 — Client 1 | `go run ./cmd/client --mode ui --server 127.0.0.1:9000 --ui-port 8081 --p2p-addr 127.0.0.1:9101 --storage storage/client1` | `http://127.0.0.1:8081` | `hung.vo` |
+| 3 — Client 2 | `go run ./cmd/client --mode ui --server 127.0.0.1:9000 --ui-port 8082 --p2p-addr 127.0.0.1:9102 --storage storage/client2` | `http://127.0.0.1:8082` | `Alice` |
+| 4 — Client 3 | `go run ./cmd/client --mode ui --server 127.0.0.1:9000 --ui-port 8083 --p2p-addr 127.0.0.1:9103 --storage storage/client3` | `http://127.0.0.1:8083` | `Bob` |
 
-Open each URL in a separate browser tab or window. Sign in with that row's account. The peer list should show the other connected users. Send a room message or select a peer to send a direct message.
+Open each URL in a separate browser tab or window. Sign in with that row's account. The peer list should show the other connected users. Send a room message, select a peer to send a direct message, or transfer a file. After all clients have discovered one another, stop the server with **Ctrl+C**; the clients should remain logged in and continue chat and file transfer in `P2P_ONLY` mode. Restart the server to resume server-assisted discovery and synchronization.
 
 To stop a client or the server, focus its terminal and press **Ctrl+C**. Stop the client agents before stopping the server so they can send their logout request.
 
@@ -118,6 +119,8 @@ The flags affect only outbound traffic from the configured process. Add them to 
 
 The browser UI supports peer discovery, broadcast and direct chat, and file transfer. For a small file-transfer check, choose a file in one client, send it to a connected peer, and save the received file. The default per-upload limit is 1 GiB.
 
+After both clients have logged in and discovered each other, stopping the server moves each UI to `P2P_ONLY`. Broadcast chat, direct chat, and file transfer continue over their separate UDP peer listeners. The clients probe the server in the background and reconnect without clearing the current chat or file history. Peers must be able to reach each other's advertised UDP address and port; this setup does not perform NAT traversal.
+
 Client files are kept under each agent's configured storage directory:
 
 - `staging/` holds files being prepared or uploaded.
@@ -154,6 +157,7 @@ The download filename may be adjusted to avoid overwriting an existing file. Com
 --ui-port          Local loopback port alias, for example 8082.
 --storage-dir      Per-client storage root; defaults to storage.
 --storage          Alias for --storage-dir.
+--p2p-addr         Peer UDP listener; defaults to 0.0.0.0:0 (an available port).
 --max-upload-bytes Maximum browser upload size; defaults to 1073741824 bytes.
 ```
 
