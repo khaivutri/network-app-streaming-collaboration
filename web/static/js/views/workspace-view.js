@@ -54,12 +54,13 @@ export function renderWorkspace(root, snapshot, { onOpenPeer, onChanged, onRefre
   logout.addEventListener("click", async () => { if (await confirmModal("Xác nhận đăng xuất", "Bạn có chắc muốn đăng xuất?")) { await API.logout(); await onRefresh(); } });
   userActions.append(logout);
   header.append(title, onlineCount);
+  let connectionBanner = null;
   if (snapshot.connection_state !== "CONNECTED") {
     const connection = document.createElement("div");
     connection.className = "connection-banner";
     connection.setAttribute("role", "status");
-    connection.textContent = snapshot.connection_state === "RECONNECTING" ? "Mất kết nối. Một số tính năng không khả dụng. · Đang kết nối lại…" : "Đã ngắt kết nối. Vui lòng đăng nhập lại.";
-    layout.insertBefore(connection, sidebar);
+    connection.textContent = snapshot.connection_state === "P2P_ONLY" ? "Máy chủ tạm ngưng · Đang kết nối trực tiếp P2P (Nhắn tin & Truyền file vẫn hoạt động)" : snapshot.connection_state === "RECONNECTING" ? "Mất kết nối. Một số tính năng không khả dụng. · Đang kết nối lại…" : "Đã ngắt kết nối. Vui lòng đăng nhập lại.";
+    connectionBanner = connection;
   }
   const messages = document.createElement("div");
   messages.className = "message-list";
@@ -105,7 +106,9 @@ export function renderWorkspace(root, snapshot, { onOpenPeer, onChanged, onRefre
   hint.textContent = "Enter để gửi · Shift+Enter để xuống dòng";
   composerDock.append(form, hint);
   main.append(header, messages, composerDock);
-  layout.append(topbar, sidebar, main);
+  layout.append(topbar);
+  if (connectionBanner) layout.append(connectionBanner);
+  layout.append(sidebar, main);
   root.append(layout);
 }
 
@@ -117,7 +120,8 @@ function messageBubble(message, outgoing, deliveryStatus) {
   const content = document.createElement("p");
   content.textContent = message.content || "";
   const time = document.createElement("small");
-  time.textContent = message.timestamp ? new Intl.DateTimeFormat("vi-VN", { hour: "2-digit", minute: "2-digit" }).format(new Date(message.timestamp)) : "";
+  const messageTime = message.server_time || message.timestamp;
+  time.textContent = messageTime ? new Intl.DateTimeFormat("vi-VN", { hour: "2-digit", minute: "2-digit" }).format(new Date(messageTime)) : "";
   bubble.append(sender, content, time);
   if (outgoing && deliveryStatus === "FAILED") {
     const failed = document.createElement("span");

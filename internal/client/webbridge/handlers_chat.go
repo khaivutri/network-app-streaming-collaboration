@@ -38,6 +38,10 @@ func (s *Server) handlePeersRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := requestContext(r.Context(), 5*time.Second)
 	defer cancel()
+	if s.service.Snapshot().ConnectionState == "P2P_ONLY" {
+		writeJSON(w, http.StatusOK, map[string]any{"status": "P2P_ONLY", "online_peers": s.service.Snapshot().OnlinePeers})
+		return
+	}
 	if err := s.service.RefreshPeers(ctx); err != nil {
 		writeError(w, http.StatusServiceUnavailable, "ERR_PEERS_REFRESH", "Không thể làm mới danh sách thành viên")
 		return

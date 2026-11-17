@@ -57,6 +57,7 @@ export function renderDirectChat(root, snapshot, selectedPeer, { onBack, onChang
   main.className = "workspace-main direct-main";
   const currentPeer = snapshot.online_peers.find((item) => item.username === selectedPeer);
   const online = currentPeer?.status === "ONLINE";
+  const canSend = online && (snapshot.connection_state === "CONNECTED" || snapshot.connection_state === "P2P_ONLY");
   const header = document.createElement("header");
   header.className = "chat-header direct-header";
   const back = document.createElement("button");
@@ -131,13 +132,13 @@ export function renderDirectChat(root, snapshot, selectedPeer, { onBack, onChang
   attach.className = "icon-button attach-button";
   attach.textContent = "＋";
   attach.title = "Đính kèm tệp";
-  attach.disabled = !online || snapshot.connection_state !== "CONNECTED";
+  attach.disabled = !canSend;
   attach.addEventListener("click", () => fileInput.click());
   const input = document.createElement("textarea");
   input.rows = 1;
   input.autocomplete = "off";
   input.placeholder = online ? "Nhập tin nhắn..." : "Người nhận đang ngoại tuyến";
-  input.disabled = !online || snapshot.connection_state !== "CONNECTED";
+  input.disabled = !canSend;
   input.value = uiState.directDrafts.get(selectedPeer) || "";
   input.addEventListener("input", () => uiState.directDrafts.set(selectedPeer, input.value));
   input.addEventListener("keydown", (event) => {
@@ -181,7 +182,7 @@ export function renderDirectChat(root, snapshot, selectedPeer, { onBack, onChang
       }
       showToast(error.message, "error");
     }
-    finally { send.disabled = !online || snapshot.connection_state !== "CONNECTED"; }
+    finally { send.disabled = !canSend; }
   });
   if (selectedFile.value) renderPreview();
   const hint = document.createElement("p");
@@ -189,6 +190,13 @@ export function renderDirectChat(root, snapshot, selectedPeer, { onBack, onChang
   hint.textContent = "Enter để gửi · Shift+Enter để xuống dòng";
   composerDock.append(preview, form, hint, fileInput);
   main.append(header, messages, composerDock);
+  if (snapshot.connection_state === "P2P_ONLY") {
+    const banner = document.createElement("div");
+    banner.className = "connection-banner";
+    banner.setAttribute("role", "status");
+    banner.textContent = "Máy chủ tạm ngưng · Đang kết nối trực tiếp P2P";
+    main.insertBefore(banner, messages);
+  }
   layout.append(topbar, sidebar, main);
   root.append(layout);
 }
