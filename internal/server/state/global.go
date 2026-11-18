@@ -44,6 +44,13 @@ type UserSession struct {
 	ReliableSession *rudp.Session
 }
 
+// BroadcastTarget carries a recipient queue and its session encryption context.
+type BroadcastTarget struct {
+	ConnectionID uint32
+	OutboundCh   chan []byte
+	Cipher       *security.SessionCipher
+}
+
 // sessionPeer converts internal state into a detached wire DTO.
 func sessionPeer(session *UserSession, status string) protocol.PeerDTO {
 	return protocol.PeerDTO{
@@ -84,16 +91,75 @@ func RegisterAuthenticatedUserWithCipher(username, displayName string, connID ui
 	return registerAuthenticatedUser(username, displayName, connID, remoteAddr, sessionKey, outboundCh, cipher)
 }
 
-func RegisterReliableUser(username, displayName string, sess *rudp.Session) ([]protocol.PeerDTO, []chan []byte, error) {
-	peers, targets, err := RegisterAuthenticatedUserWithCipher(username, displayName, sess.ID(), sess.RemoteAddr(), [32]byte{}, sess.OutboundQueue(), sess.Cipher())
-	if err == nil {
-		GlobalUsersMu.Lock()
-		if user := GlobalOnlineUsers[username]; user != nil {
-			user.ReliableSession = sess
-		}
-		GlobalUsersMu.Unlock()
+// RegisterReliableUser records a reliable session and snapshots encrypted broadcast targets.
+func RegisterReliableUser(username, displayName string, sess *rudp.Session) ([]protocol.PeerDTO, []BroadcastTarget, error) {
+	GlobalUsersMu.Lock()
+	defer GlobalUsersMu.Unlock()
+	if _, exists := GlobalOnlineUsers[username]; exists {
+		return nil, nil, ErrUserAlreadyOnline
 	}
-	return peers, targets, err
+	if _, exists := GlobalConnIndex[sess.ID()]; exists {
+		return nil, nil, ErrConnectionAlreadyInUse
+	}
+	addr := sess.RemoteAddr()
+	now := time.Now()
+	session := &UserSession{
+		Username:        username,
+		DisplayName:     displayName,
+		ConnectionID:    sess.ID(),
+		IP:              addr.IP.String(),
+		Port:            addr.Port,
+		UDPAddr:         addr,
+		LoginAt:         now,
+		LastHeartbeatAt: now,
+		OutboundCh:      sess.OutboundQueue(),
+		Cipher:          sess.Cipher(),
+		ReliableSession: sess,
+	}
+	GlobalOnlineUsers[username] = session
+	GlobalConnIndex[sess.ID()] = username
+	peers := make([]protocol.PeerDTO, 0, len(GlobalOnlineUsers))
+	targets := make([]BroadcastTarget, 0, len(GlobalOnlineUsers)-1)
+	for _, item := range GlobalOnlineUsers {
+		peers = append(peers, sessionPeer(item, "ONLINE"))
+		if item.Username != username && item.OutboundCh != nil {
+			targets = append(targets, BroadcastTarget{
+				ConnectionID: item.ConnectionID,
+				OutboundCh:   item.OutboundCh,
+				Cipher:       item.Cipher,
+			})
+		}
+	}
+	return peers, targets, nil
+}
+
+// RemoveReliableUserByConnID removes a reliable session and snapshots remaining targets.
+func RemoveReliableUserByConnID(connID uint32) (*protocol.PeerDTO, []BroadcastTarget, bool) {
+	GlobalUsersMu.Lock()
+	defer GlobalUsersMu.Unlock()
+	username, ok := GlobalConnIndex[connID]
+	if !ok {
+		return nil, nil, false
+	}
+	session, ok := GlobalOnlineUsers[username]
+	if !ok {
+		delete(GlobalConnIndex, connID)
+		return nil, nil, false
+	}
+	peer := sessionPeer(session, "OFFLINE")
+	delete(GlobalOnlineUsers, username)
+	delete(GlobalConnIndex, connID)
+	targets := make([]BroadcastTarget, 0, len(GlobalOnlineUsers))
+	for _, item := range GlobalOnlineUsers {
+		if item.OutboundCh != nil {
+			targets = append(targets, BroadcastTarget{
+				ConnectionID: item.ConnectionID,
+				OutboundCh:   item.OutboundCh,
+				Cipher:       item.Cipher,
+			})
+		}
+	}
+	return &peer, targets, true
 }
 
 func registerAuthenticatedUser(username, displayName string, connID uint32, remoteAddr *net.UDPAddr, sessionKey [32]byte, outboundCh chan []byte, cipher *security.SessionCipher) (allPeers []protocol.PeerDTO, otherTargets []chan []byte, err error) {

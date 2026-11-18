@@ -383,15 +383,21 @@ func (c *ChatClient) Listen(ctx context.Context) (err error) {
 		if parseErr != nil {
 			continue
 		}
-		if packet.Hdr.HasFlag(protocol.FlagENC) {
-			cipher := c.getCipher()
-			if cipher == nil {
-				continue
+		cipher := c.getCipher()
+		if cipher != nil {
+			if !packet.Hdr.HasFlag(protocol.FlagENC) {
+				plaintextAck := packet.Hdr.MsgType == protocol.MsgAck && len(packet.Payload) == 0
+				if !plaintextAck {
+					continue
+				}
+			} else {
+				packet.Payload, parseErr = cipher.DecryptPacket(packet.Hdr, buffer[:protocol.HeaderSize], packet.Payload)
+				if parseErr != nil {
+					continue
+				}
 			}
-			packet.Payload, parseErr = cipher.DecryptPacket(packet.Hdr, buffer[:protocol.HeaderSize], packet.Payload)
-			if parseErr != nil {
-				continue
-			}
+		} else if packet.Hdr.HasFlag(protocol.FlagENC) {
+			continue
 		}
 		c.handlePacket(packet)
 	}

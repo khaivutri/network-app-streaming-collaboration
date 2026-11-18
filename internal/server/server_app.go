@@ -159,7 +159,7 @@ func (app *ServerApp) handleLogout(sess *rudp.Session, _ uint8, payload []byte) 
 	if !ok || username != req.Username {
 		return app.sendJSON(sess, protocol.MsgLogoutResponse, protocol.LogoutResponsePayload{RequestID: req.RequestID, Message: "Phiên đăng nhập không hợp lệ", ServerTime: time.Now().UnixMilli()})
 	}
-	removed, targets, existed := state.RemoveUserByConnID(sess.ID())
+	removed, targets, existed := state.RemoveReliableUserByConnID(sess.ID())
 	if existed && removed != nil {
 		now := time.Now().UnixMilli()
 		app.broadcast(targets, protocol.DiscoUpdatePayload{Event: "LEAVE", Reason: "LOGOUT", Peer: *removed, OnlineCount: len(state.GetSnapshotOnlinePeers()), ServerTime: now})
@@ -228,7 +228,7 @@ func (app *ServerApp) OnSessionClosed(sess *rudp.Session, reason string) {
 			}
 		}
 	}
-	removed, targets, existed := state.RemoveUserByConnID(sess.ID())
+	removed, targets, existed := state.RemoveReliableUserByConnID(sess.ID())
 	if !existed || removed == nil {
 		return
 	}
@@ -280,27 +280,35 @@ func (app *ServerApp) sendJSON(sess *rudp.Session, msgType uint8, value any) err
 	return nil
 }
 
-func (app *ServerApp) broadcast(targets []chan []byte, update protocol.DiscoUpdatePayload) {
+// broadcast seals each presence update for the recipient's authenticated session.
+func (app *ServerApp) broadcast(targets []state.BroadcastTarget, update protocol.DiscoUpdatePayload) {
 	payload, err := protocol.EncodeJSONPayload(update)
 	if err != nil {
 		return
 	}
-	raw, err := protocol.MarshalPacket(&protocol.Packet{
-		Hdr: protocol.Header{
-			Version:    protocol.ProtocolVersion,
-			Flags:      protocol.FlagREL | protocol.FlagORD,
-			MsgType:    protocol.MsgDiscoUpdate,
-			StreamID:   protocol.StreamControl,
-			WindowSize: protocol.DefaultWindowSize,
-		}, Payload: payload})
-	if err != nil {
-		return
-	}
 	for _, target := range targets {
+		hdr := protocol.Header{
+			Version:      protocol.ProtocolVersion,
+			Flags:        protocol.FlagREL | protocol.FlagORD,
+			MsgType:      protocol.MsgDiscoUpdate,
+			StreamID:     protocol.StreamControl,
+			ConnectionID: target.ConnectionID,
+			WindowSize:   protocol.DefaultWindowSize,
+		}
+		var raw []byte
+		if target.Cipher != nil {
+			raw, err = target.Cipher.EncryptPacket(hdr, payload)
+		} else {
+			raw, err = protocol.MarshalPacket(&protocol.Packet{Hdr: hdr, Payload: payload})
+		}
+		if err != nil {
+			slog.Warn("server failed to encode presence update", "conn_id", target.ConnectionID, "error", err)
+			continue
+		}
 		select {
-		case target <- raw:
+		case target.OutboundCh <- raw:
 		default:
-			slog.Warn("server dropped update for slow consumer")
+			slog.Warn("server dropped update for slow consumer", "conn_id", target.ConnectionID)
 		}
 	}
 }

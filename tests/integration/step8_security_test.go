@@ -2,10 +2,15 @@ package integration
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"net"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	clientapp "github.com/khaivutri/network-app-streaming-collaboration/internal/client"
+	clientstate "github.com/khaivutri/network-app-streaming-collaboration/internal/client/state"
 	security "github.com/khaivutri/network-app-streaming-collaboration/pkg/crypto"
 	"github.com/khaivutri/network-app-streaming-collaboration/pkg/protocol"
 )
@@ -91,5 +96,80 @@ func TestStep8_SessionIsolation_BR07(t *testing.T) {
 	}
 	if _, err := charlie.DecryptRawPacket(raw); !errors.Is(err, security.ErrAuthTagMismatch) && !errors.Is(err, security.ErrInvalidDirection) {
 		t.Fatalf("wrong-session decrypt error=%v", err)
+	}
+}
+
+// TestStep8_ClientRejectsUnencryptedDiscoUpdate confirms plaintext presence cannot modify an encrypted session.
+func TestStep8_ClientRejectsUnencryptedDiscoUpdate(t *testing.T) {
+	clientConn, err := net.ListenUDP("udp4", &net.UDPAddr{
+		IP: net.ParseIP("127.0.0.1"),
+	})
+	if err != nil {
+		t.Skipf("loopback UDP unavailable: %v", err)
+	}
+	defer clientConn.Close()
+	attackerConn, err := net.ListenUDP("udp4", &net.UDPAddr{
+		IP: net.ParseIP("127.0.0.1"),
+	})
+	if err != nil {
+		t.Skipf("loopback UDP unavailable: %v", err)
+	}
+	defer attackerConn.Close()
+
+	clientCipher, _ := step8CipherPair(t)
+	store := clientstate.NewClientStore()
+	store.ReplaceOnlinePeers([]protocol.PeerDTO{
+		{
+			Username: "Bob",
+			Status:   "ONLINE",
+		},
+	})
+	chat := clientapp.NewChatClient(clientConn, attackerConn.LocalAddr().(*net.UDPAddr), 77, store)
+	chat.SetCipher(clientCipher)
+	ctx, cancel := context.WithCancel(context.Background())
+	listenDone := make(chan error, 1)
+	go func() {
+		listenDone <- chat.Listen(ctx)
+	}()
+
+	payload, err := protocol.EncodeJSONPayload(protocol.DiscoUpdatePayload{
+		Event: "LEAVE",
+		Peer: protocol.PeerDTO{
+			Username: "Bob",
+			Status:   "OFFLINE",
+		},
+	})
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	raw, err := protocol.MarshalPacket(&protocol.Packet{
+		Hdr: protocol.Header{
+			Version:      protocol.ProtocolVersion,
+			Flags:        protocol.FlagREL | protocol.FlagORD,
+			MsgType:      protocol.MsgDiscoUpdate,
+			StreamID:     protocol.StreamControl,
+			ConnectionID: 77,
+			WindowSize:   protocol.DefaultWindowSize,
+		},
+		Payload: payload,
+	})
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	if _, err = attackerConn.WriteToUDP(raw, clientConn.LocalAddr().(*net.UDPAddr)); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	select {
+	case <-listenDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("ChatClient.Listen did not stop after cancellation")
+	}
+	if bob, ok := store.GetPeer("Bob"); !ok || bob.Status != "ONLINE" {
+		t.Fatalf("plaintext LEAVE modified Bob's presence: %#v, found=%v", bob, ok)
 	}
 }
