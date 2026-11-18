@@ -1,9 +1,11 @@
 import { API } from "../api-client.js";
 import { confirmModal } from "../components/modal.js";
-import { renderFileCard } from "../components/file-card.js";
+import { renderFileCard, updateFileCard } from "../components/file-card.js";
 import { showToast } from "../components/toast.js";
 
-export function renderDirectChat(root, snapshot, selectedPeer, { onBack, onChanged, onOpenPeer, onFileTransfer, onOptimisticMessage, uiState }) {
+export function renderDirectChat(root, snapshot, selectedPeer, { onBack, onChanged, onOpenPeer, onFileTransfer, onOptimisticMessage, onReplaceTransfer, onRemoveTransfer, uiState, change }) {
+  const viewKey = `direct:${selectedPeer}`;
+  if (root.dataset.viewKey === viewKey && root.__viewRefs) { patchDirect(root.__viewRefs, snapshot, selectedPeer, change); return; }
   root.replaceChildren();
   const layout = document.createElement("div");
   layout.className = "workspace-layout";
@@ -88,7 +90,7 @@ export function renderDirectChat(root, snapshot, selectedPeer, { onBack, onChang
   ].sort((a, b) => a.at - b.at || a.order - b.order);
   if (!timeline.length) messages.append(emptyNotice("Chưa có tin nhắn. Hãy bắt đầu cuộc trò chuyện."));
   timeline.forEach(({ kind, item }) => {
-    if (kind === "message") messages.append(messageBubble(item, item.sender === snapshot.current_user?.username));
+    if (kind === "message") { const bubble = messageBubble(item, item.sender === snapshot.current_user?.username); updateBubble(bubble, item, item.sender === snapshot.current_user?.username, snapshot.delivery_status[item.client_msg_id]); messages.append(bubble); }
     else messages.append(renderFileCard(item, {
       outgoing: item.direction === "UPLOAD",
       onCancel: async (id) => { if (await confirmModal("Huỷ truyền tệp?", "Tệp chưa hoàn tất sẽ bị xoá khỏi thiết bị người nhận.", "Huỷ truyền")) { await API.cancelFile(id); await onChanged(); } },
@@ -160,29 +162,24 @@ export function renderDirectChat(root, snapshot, selectedPeer, { onBack, onChang
     uiState.directDrafts.set(selectedPeer, "");
     const messageID = makeMessageID();
     if (content) onOptimisticMessage?.("UNICAST", currentPeer.username, { client_msg_id: messageID, sender: snapshot.current_user?.username, content, server_time: Date.now() });
-    send.disabled = true;
-    let messageSent = false;
-    try {
-      if (content) {
-        await API.unicast(messageID, currentPeer.username, content);
-        messageSent = true;
-      }
-      if (file) {
-        const result = await API.sendFile(currentPeer.username, "", file);
-        onFileTransfer?.({ ...result, direction: "UPLOAD", peer: currentPeer.username, file_size: file.size, created_at: Date.now(), state: result.state || "INIT", transferred_bytes: 0, percentage: 0 });
-      }
-      fileInput.value = "";
-      selectedFile.value = null;
-      uiState.selectedFiles.delete(selectedPeer);
-      preview.hidden = true;
-    } catch (error) {
-      if (!messageSent) {
-        input.value = content;
-        uiState.directDrafts.set(selectedPeer, content);
-      }
-      showToast(error.message, "error");
+    fileInput.value = "";
+    selectedFile.value = null;
+    uiState.selectedFiles.delete(selectedPeer);
+    preview.hidden = true;
+    if (content) {
+      API.unicast(messageID, currentPeer.username, content).catch((error) => {
+        if (!input.value.trim()) { input.value = content; uiState.directDrafts.set(selectedPeer, content); }
+        showToast(error.message, "error");
+      });
     }
-    finally { send.disabled = !canSend; }
+    if (file) {
+      const tempID = `local-${makeMessageID()}`;
+      const transfer = { transfer_id: tempID, direction: "UPLOAD", peer: currentPeer.username, file_name: file.name, file_size: file.size, created_at: Date.now(), state: "UPLOADING_LOCAL", transferred_bytes: 0, percentage: 0 };
+      onFileTransfer?.(transfer);
+      API.sendFile(currentPeer.username, "", file, (percentage, loaded) => onFileTransfer?.({ ...transfer, transferred_bytes: loaded || 0, percentage }))
+        .then((result) => onReplaceTransfer?.(tempID, { ...result, direction: "UPLOAD", peer: currentPeer.username, file_size: file.size, created_at: Date.now(), state: result.state || "INIT", transferred_bytes: 0, percentage: 0 }))
+        .catch((error) => { onRemoveTransfer?.(tempID); showToast(error.message, "error"); });
+    }
   });
   if (selectedFile.value) renderPreview();
   const hint = document.createElement("p");
@@ -199,10 +196,68 @@ export function renderDirectChat(root, snapshot, selectedPeer, { onBack, onChang
   }
   layout.append(topbar, sidebar, main);
   root.append(layout);
+  root.dataset.viewKey = viewKey;
+  root.__viewRefs = { rosterHeading, roster, avatar, title, status, messages, input, send, attach, onOpenPeer, onBack, onChanged, main, banner: main.querySelector(".connection-banner") };
+}
+
+function patchDirect(refs, snapshot, selectedPeer, change) {
+  const peer = snapshot.online_peers.find((item) => item.username === selectedPeer);
+  const online = peer?.status === "ONLINE";
+  const canSend = online && ["CONNECTED", "P2P_ONLY"].includes(snapshot.connection_state);
+  refs.rosterHeading.textContent = `THÀNH VIÊN (${snapshot.online_peers.length})`;
+  refs.roster.replaceChildren(...snapshot.online_peers.map((member) => {
+    const button = document.createElement("button"); button.className = "peer-row"; button.setAttribute("aria-current", member.username === selectedPeer ? "page" : "false"); button.disabled = member.username === snapshot.current_user?.username;
+    const dot = document.createElement("span"); dot.className = "peer-status"; const name = document.createElement("span"); name.textContent = `${member.display_name || member.username}${member.username === snapshot.current_user?.username ? " (Bạn)" : ""}`;
+    button.append(dot, name); button.addEventListener("click", () => refs.onOpenPeer?.(member.username)); return button;
+  }));
+  refs.avatar.textContent = (peer?.display_name || peer?.username || "?").slice(0, 1).toUpperCase();
+  refs.title.textContent = peer?.display_name || peer?.username || "Thành viên";
+  refs.status.className = online ? "peer-online" : "peer-offline"; refs.status.textContent = online ? "● Đang hoạt động" : "Ngoại tuyến";
+  refs.input.disabled = !canSend; refs.send.disabled = !canSend; refs.attach.disabled = !canSend; refs.input.placeholder = online ? "Nhập tin nhắn..." : "Người nhận đang ngoại tuyến";
+  const wantsBanner = snapshot.connection_state === "P2P_ONLY";
+  if (wantsBanner && !refs.banner) { refs.banner = document.createElement("div"); refs.banner.className = "connection-banner"; refs.banner.setAttribute("role", "status"); refs.banner.textContent = "Máy chủ tạm ngưng · Đang kết nối trực tiếp P2P"; refs.main.insertBefore(refs.banner, refs.messages); }
+  else if (!wantsBanner && refs.banner) { refs.banner.remove(); refs.banner = null; }
+  patchTimeline(refs.messages, snapshot.direct_messages[selectedPeer] || [], snapshot.file_transfers.filter((file) => file.peer === selectedPeer), snapshot, change, refs.onChanged);
+}
+
+function patchTimeline(container, messages, files, snapshot, change, onChanged) {
+  const keepAtBottom = container.scrollHeight - container.scrollTop - container.clientHeight <= 64;
+  const timeline = [...messages.map((item, i) => ({ kind: "message", item, at: Number(item.server_time || item.sent_at || 0), order: i })), ...files.map((item, i) => ({ kind: "file", item, at: Number(item.created_at || item.updated_at || 0), order: i }))].sort((a, b) => a.at - b.at || a.order - b.order);
+  if (!timeline.length) { if (!container.querySelector(".empty-state")) container.append(emptyNotice("Chưa có tin nhắn. Hãy bắt đầu cuộc trò chuyện.")); return; }
+  container.querySelector(".empty-state")?.remove();
+  let addedOutgoingFile = false;
+  const nodes = timeline.map(({ kind, item }) => {
+    const id = kind === "file" ? item.transfer_id : item.client_msg_id || item.msg_id;
+    let node = [...container.children].find((child) => kind === "file" ? child.dataset.transferId === id || (change?.previousTransferId && child.dataset.transferId === change.previousTransferId) : child.dataset.clientMsgId === item.client_msg_id || (item.msg_id && child.dataset.msgId === item.msg_id));
+    if (kind === "file") {
+      if (!node && item.direction === "UPLOAD" && item.state === "UPLOADING_LOCAL") addedOutgoingFile = true;
+      return node ? updateFileCard(node, item, directFileCallbacks(onChanged, item)) : renderFileCard(item, directFileCallbacks(onChanged, item));
+    }
+    if (node) updateBubble(node, item, item.sender === snapshot.current_user?.username, snapshot.delivery_status[item.client_msg_id]);
+    return node || messageBubble(item, item.sender === snapshot.current_user?.username, snapshot.delivery_status[item.client_msg_id]);
+  });
+  nodes.forEach((node, index) => { if (container.children[index] !== node) container.insertBefore(node, container.children[index] || null); });
+  while (container.children.length > nodes.length) container.lastElementChild.remove();
+  if (keepAtBottom || change?.type === "chat.optimistic" || addedOutgoingFile) container.scrollTop = container.scrollHeight;
+}
+
+function directFileCallbacks(onChanged, file) { return {
+  outgoing: file?.direction === "UPLOAD",
+  onCancel: async (id) => { if (await confirmModal("Huỷ truyền tệp?", "Tệp chưa hoàn tất sẽ bị xoá khỏi thiết bị người nhận.", "Huỷ truyền")) { await API.cancelFile(id); await onChanged?.(); } },
+  onRetry: async (id) => { await API.retryFile(id); await onChanged?.(); },
+}; }
+
+function updateBubble(bubble, message, outgoing, deliveryStatus) {
+  bubble.dataset.clientMsgId = message.client_msg_id || ""; bubble.dataset.msgId = message.msg_id || ""; bubble.className = `message-bubble ${outgoing ? "outgoing" : "incoming"}`;
+  bubble.children[0].textContent = message.sender_display || message.sender || "Bạn"; bubble.children[1].textContent = message.content || ""; bubble.children[2].textContent = `${formatTime(message.server_time || message.timestamp)}${message.optimistic ? " · Đang gửi" : ""}`;
+  let failed = bubble.querySelector(".message-failed");
+  if (outgoing && deliveryStatus === "FAILED") { if (!failed) { failed = document.createElement("span"); failed.className = "message-failed"; bubble.append(failed); } failed.textContent = "Gửi thất bại · Thử gửi lại bằng cách soạn tin nhắn mới"; } else failed?.remove();
 }
 
 function messageBubble(message, outgoing) {
   const bubble = document.createElement("article");
+  bubble.dataset.clientMsgId = message.client_msg_id || "";
+  bubble.dataset.msgId = message.msg_id || "";
   bubble.className = `message-bubble ${outgoing ? "outgoing" : "incoming"}`;
   const sender = document.createElement("strong");
   sender.textContent = message.sender_display || message.sender || "Bạn";

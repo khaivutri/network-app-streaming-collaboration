@@ -3,6 +3,7 @@ import { API } from "../api-client.js";
 export function renderFileCard(file, { onCancel, onRetry, outgoing = file.direction === "UPLOAD" } = {}) {
   const state = String(file.state || "INIT").toUpperCase();
   const card = document.createElement("article");
+  card.dataset.transferId = file.transfer_id || "";
   card.className = `file-card ${outgoing ? "outgoing" : "incoming"} file-${state.toLowerCase()}`;
   const metadata = document.createElement("div");
   metadata.className = "file-metadata";
@@ -21,14 +22,14 @@ export function renderFileCard(file, { onCancel, onRetry, outgoing = file.direct
   card.append(metadata);
 
   const percentage = Math.max(0, Math.min(100, Number(file.percentage || 0)));
-  if (["INIT", "TRANSFERRING"].includes(state)) {
+  if (["INIT", "TRANSFERRING", "UPLOADING_LOCAL"].includes(state)) {
     const progress = document.createElement("progress");
     progress.max = 100;
     progress.value = percentage;
     progress.setAttribute("aria-label", `Đang truyền tệp: ${percentage}%`);
     const progressLabel = document.createElement("div");
     progressLabel.className = "file-progress-label";
-    progressLabel.textContent = `${percentage.toFixed(1)}% · ${formatBytes(Number(file.transferred_bytes || 0))} / ${formatBytes(Number(file.file_size || 0))}`;
+    progressLabel.textContent = state === "UPLOADING_LOCAL" ? `${percentage.toFixed(1)}% · Đang nạp lên agent` : `${percentage.toFixed(1)}% · ${formatBytes(Number(file.transferred_bytes || 0))} / ${formatBytes(Number(file.file_size || 0))}`;
     card.append(progress, progressLabel);
   }
 
@@ -36,6 +37,7 @@ export function renderFileCard(file, { onCancel, onRetry, outgoing = file.direct
   status.className = "file-status";
   status.textContent = ({
     INIT: "Đang chuẩn bị…",
+    UPLOADING_LOCAL: "Đang nạp tệp lên agent…",
     TRANSFERRING: "Đang truyền tệp…",
     COMPLETED: "Đã truyền thành công",
     FAILED: file.error_message || "Gián đoạn đường truyền",
@@ -62,6 +64,28 @@ export function renderFileCard(file, { onCancel, onRetry, outgoing = file.direct
   }
   if (actions.childElementCount) card.append(actions);
   return card;
+}
+
+export function updateFileCard(cardEl, file, callbacks) {
+  if (!cardEl) return null;
+  const previousState = [...cardEl.classList].find((name) => name.startsWith("file-"))?.slice(5)?.toUpperCase();
+  const state = String(file.state || "INIT").toUpperCase();
+  const active = (value) => ["INIT", "TRANSFERRING", "UPLOADING_LOCAL"].includes(value);
+  if (active(previousState) && active(state)) {
+    cardEl.dataset.transferId = file.transfer_id || "";
+    cardEl.className = `file-card ${file.direction === "DOWNLOAD" ? "incoming" : "outgoing"} file-${state.toLowerCase()}`;
+    const percentage = Math.max(0, Math.min(100, Number(file.percentage || 0)));
+    const progress = cardEl.querySelector("progress");
+    const label = cardEl.querySelector(".file-progress-label");
+    const status = cardEl.querySelector(".file-status");
+    if (progress) { progress.value = percentage; progress.setAttribute("aria-label", `Đang truyền tệp: ${percentage}%`); }
+    if (label) label.textContent = state === "UPLOADING_LOCAL" ? `${percentage.toFixed(1)}% · Đang nạp lên agent` : `${percentage.toFixed(1)}% · ${formatBytes(Number(file.transferred_bytes || 0))} / ${formatBytes(Number(file.file_size || 0))}`;
+    if (status) status.textContent = ({ INIT: "Đang chuẩn bị…", TRANSFERRING: "Đang truyền tệp…", UPLOADING_LOCAL: "Đang nạp tệp lên agent…" })[state];
+    return cardEl;
+  }
+  const nextCard = renderFileCard(file, callbacks);
+  cardEl.replaceWith(nextCard);
+  return nextCard;
 }
 
 function actionButton(label, className, action) {

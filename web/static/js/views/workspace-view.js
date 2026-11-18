@@ -1,9 +1,10 @@
 import { API } from "../api-client.js";
 import { confirmModal } from "../components/modal.js";
-import { renderFileCard } from "../components/file-card.js";
+import { renderFileCard, updateFileCard } from "../components/file-card.js";
 import { showToast } from "../components/toast.js";
 
 export function renderWorkspace(root, snapshot, { onOpenPeer, onChanged, onRefresh, uiState }) {
+  if (root.dataset.viewKey === "workspace" && root.__viewRefs) { patchWorkspace(root.__viewRefs, snapshot); return; }
   root.replaceChildren();
   const layout = document.createElement("div");
   layout.className = "workspace-layout";
@@ -110,10 +111,59 @@ export function renderWorkspace(root, snapshot, { onOpenPeer, onChanged, onRefre
   if (connectionBanner) layout.append(connectionBanner);
   layout.append(sidebar, main);
   root.append(layout);
+  root.dataset.viewKey = "workspace";
+  root.__viewRefs = { root, sidebar, onlineCount, messages, connectionBanner, onOpenPeer, onRefresh };
+}
+
+function patchWorkspace(refs, snapshot) {
+  const beforeBottom = refs.messages.scrollHeight - refs.messages.scrollTop - refs.messages.clientHeight <= 64;
+  refs.onlineCount.textContent = `${snapshot.online_peers.filter((peer) => peer.status === "ONLINE").length} người đang online`;
+  const peersHeading = refs.sidebar.querySelector("h2"); peersHeading.textContent = `THÀNH VIÊN (${snapshot.online_peers.length})`;
+  refs.sidebar.querySelectorAll(".peer-row").forEach((node) => node.remove());
+  const common = refs.sidebar.querySelector(".common-chat-link");
+  snapshot.online_peers.forEach((peer) => {
+    const button = document.createElement("button"); button.className = "peer-row"; button.setAttribute("aria-current", "false");
+    const dot = document.createElement("span"); dot.className = "peer-status"; const label = document.createElement("span"); label.textContent = `${peer.display_name || peer.username}${peer.username === snapshot.current_user?.username ? " (Bạn)" : ""}`;
+    button.append(dot, label); button.addEventListener("click", () => refs.onOpenPeer?.(peer.username)); refs.sidebar.insertBefore(button, common);
+  });
+  const message = snapshot.connection_state === "P2P_ONLY" ? "Máy chủ tạm ngưng · Đang kết nối trực tiếp P2P (Nhắn tin & Truyền file vẫn hoạt động)" : snapshot.connection_state === "RECONNECTING" ? "Mất kết nối. Một số tính năng không khả dụng. · Đang kết nối lại…" : "Đã ngắt kết nối. Vui lòng đăng nhập lại.";
+  if (snapshot.connection_state !== "CONNECTED") {
+    if (!refs.connectionBanner) { refs.connectionBanner = document.createElement("div"); refs.connectionBanner.className = "connection-banner"; refs.connectionBanner.setAttribute("role", "status"); refs.root.querySelector(".workspace-layout").insertBefore(refs.connectionBanner, refs.sidebar); }
+    refs.connectionBanner.textContent = message;
+  } else if (refs.connectionBanner) { refs.connectionBanner.remove(); refs.connectionBanner = null; }
+  patchWorkspaceTimeline(refs.messages, snapshot, beforeBottom);
+}
+
+function patchWorkspaceTimeline(container, snapshot, beforeBottom) {
+  const timeline = [...snapshot.broadcast_messages.map((item, i) => ({ kind: "message", item, at: Number(item.server_time || item.sent_at || 0), order: i })), ...snapshot.file_transfers.filter((file) => file.peer === "").map((item, i) => ({ kind: "file", item, at: Number(item.created_at || item.updated_at || 0), order: i }))].sort((a, b) => a.at - b.at || a.order - b.order);
+  if (!timeline.length) { if (!container.querySelector(".empty-state")) container.append(emptyState()); return; }
+  container.querySelector(".empty-state")?.remove();
+  const nodes = timeline.map(({ kind, item }) => {
+    const node = [...container.children].find((child) => kind === "file" ? child.dataset.transferId === item.transfer_id : child.dataset.clientMsgId === item.client_msg_id || (item.msg_id && child.dataset.msgId === item.msg_id));
+    if (kind === "file") {
+      const callbacks = { outgoing: item.direction === "UPLOAD", onCancel: async (id) => { await API.cancelFile(id); await refs.onRefresh?.(); }, onRetry: async (id) => { await API.retryFile(id); await refs.onRefresh?.(); } };
+      return node ? updateFileCard(node, item, callbacks) : renderFileCard(item, callbacks);
+    }
+    const outgoing = item.sender === snapshot.current_user?.username;
+    if (node) updateWorkspaceBubble(node, item, outgoing, snapshot.delivery_status[item.client_msg_id]);
+    return node || messageBubble(item, outgoing, snapshot.delivery_status[item.client_msg_id]);
+  });
+  nodes.forEach((node, i) => { if (container.children[i] !== node) container.insertBefore(node, container.children[i] || null); });
+  while (container.children.length > nodes.length) container.lastElementChild.remove();
+  if (beforeBottom) container.scrollTop = container.scrollHeight;
+}
+
+function updateWorkspaceBubble(bubble, message, outgoing, status) {
+  bubble.dataset.clientMsgId = message.client_msg_id || ""; bubble.dataset.msgId = message.msg_id || ""; bubble.className = `message-bubble ${outgoing ? "outgoing" : "incoming"}`;
+  bubble.children[0].textContent = message.sender_display || message.sender || "Bạn"; bubble.children[1].textContent = message.content || "";
+  const time = message.server_time || message.timestamp; bubble.children[2].textContent = time ? new Intl.DateTimeFormat("vi-VN", { hour: "2-digit", minute: "2-digit" }).format(new Date(time)) : "";
+  let failed = bubble.querySelector(".message-failed");
+  if (outgoing && status === "FAILED") { if (!failed) { failed = document.createElement("span"); failed.className = "message-failed"; bubble.append(failed); } failed.textContent = "Gửi thất bại · Thử gửi lại bằng cách soạn tin nhắn mới"; } else failed?.remove();
 }
 
 function messageBubble(message, outgoing, deliveryStatus) {
   const bubble = document.createElement("article");
+  bubble.dataset.clientMsgId = message.client_msg_id || ""; bubble.dataset.msgId = message.msg_id || "";
   bubble.className = `message-bubble ${outgoing ? "outgoing" : "incoming"}`;
   const sender = document.createElement("strong");
   sender.textContent = message.sender_display || message.sender || "Bạn";

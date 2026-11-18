@@ -1,4 +1,4 @@
-export function connectEvents(onEvent, onError, onReconnect = () => {}) {
+export function connectEvents(onEvent, onError, onReconnect = () => {}, onHealthChange = () => {}) {
   const source = new EventSource("/api/v1/events");
   let hasOpened = false;
   let wasInterrupted = false;
@@ -17,11 +17,13 @@ export function connectEvents(onEvent, onError, onReconnect = () => {}) {
     });
   }
   source.onopen = () => {
+    onHealthChange(true);
     if (hasOpened && wasInterrupted) onReconnect();
     hasOpened = true;
     wasInterrupted = false;
   };
   source.onerror = (error) => {
+    onHealthChange(false);
     wasInterrupted = true;
     onError(error);
   };

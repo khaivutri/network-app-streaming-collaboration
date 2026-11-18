@@ -45,11 +45,28 @@ export const API = {
     body.set("recipient", recipient);
     body.set("caption", caption || "");
     body.set("file", file, file.name);
-    // fetch does not expose upload progress; SSE remains the source of truth.
-    if (onProgress) onProgress(0);
-    const result = await request("/api/v1/files/send", { method: "POST", body });
-    if (onProgress) onProgress(100);
-    return result;
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", "/api/v1/files/send");
+      xhr.withCredentials = true;
+      xhr.setRequestHeader("Accept", "application/json");
+      if (csrfToken) xhr.setRequestHeader("X-Client-CSRF-Token", csrfToken);
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable && onProgress) onProgress(Math.min(100, event.loaded / event.total * 100), event.loaded, event.total);
+      };
+      xhr.onerror = () => reject(new Error("Không thể kết nối để nạp tệp lên agent."));
+      xhr.onabort = () => reject(new Error("Đã huỷ nạp tệp lên agent."));
+      xhr.onload = () => {
+        const contentType = xhr.getResponseHeader("content-type") || "";
+        if (!contentType.includes("application/json")) { reject(new Error(`Unexpected response content type: ${contentType}`)); return; }
+        let envelope;
+        try { envelope = JSON.parse(xhr.responseText); } catch { reject(new Error("Phản hồi tải tệp không hợp lệ.")); return; }
+        if (xhr.status < 200 || xhr.status >= 300 || !envelope.ok) { reject(new Error(envelope.error?.message || `HTTP ${xhr.status}`)); return; }
+        if (onProgress) onProgress(100, file.size, file.size);
+        resolve(envelope.data);
+      };
+      xhr.send(body);
+    });
   },
   async cancelFile(id) { return request(`/api/v1/files/${encodeURIComponent(id)}/cancel`, { method: "POST", body: "{}", headers: { "Content-Type": "application/json" } }); },
   async retryFile(id) { return request(`/api/v1/files/${encodeURIComponent(id)}/retry`, { method: "POST", body: "{}", headers: { "Content-Type": "application/json" } }); },

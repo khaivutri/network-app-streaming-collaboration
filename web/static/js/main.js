@@ -12,9 +12,10 @@ let stopEvents = null;
 let selectedPeer = null;
 let unsubscribeRender = null;
 let transferSyncTimer = null;
+let isSseHealthy = false;
 const uiState = { broadcastDraft: "", directDrafts: new Map(), selectedFiles: new Map() };
 
-function renderUI(snapshot) {
+function renderUI(snapshot, change) {
   if (!snapshot.authenticated) {
     selectedPeer = null;
     renderLogin(appRoot, { onLoggedIn: bootstrap });
@@ -24,8 +25,10 @@ function renderUI(snapshot) {
       onChanged: bootstrap,
       onOpenPeer: (peer) => { selectedPeer = peer; renderUI(browserStore.snapshot()); },
       onFileTransfer: (transfer) => browserStore.upsertFileTransfer(transfer),
+      onReplaceTransfer: (tempID, transfer) => browserStore.replaceTransferId(tempID, transfer),
+      onRemoveTransfer: (tempID) => browserStore.removeFileTransfer(tempID),
       onOptimisticMessage: (scope, peer, message) => browserStore.addOptimisticMessage(scope, peer, message),
-      uiState,
+      uiState, change,
     });
   } else {
     renderWorkspace(appRoot, snapshot, {
@@ -34,7 +37,7 @@ function renderUI(snapshot) {
       onRefresh: bootstrap,
       onFileTransfer: (transfer) => browserStore.upsertFileTransfer(transfer),
       onOptimisticMessage: (scope, peer, message) => browserStore.addOptimisticMessage(scope, peer, message),
-      uiState,
+      uiState, change,
     });
   }
 }
@@ -43,16 +46,17 @@ async function bootstrap() {
   try {
     const session = await API.getSession();
     browserStore.replaceSession(session);
-    if (!unsubscribeRender) unsubscribeRender = browserStore.subscribe(renderUI);
+    if (!unsubscribeRender) unsubscribeRender = browserStore.subscribe((snapshot, change) => renderUI(snapshot, change));
     if (!transferSyncTimer) transferSyncTimer = setInterval(async () => {
       const current = browserStore.snapshot();
-      if (!current.authenticated || !current.file_transfers.some((file) => ["INIT", "TRANSFERRING"].includes(file.state))) return;
+      if (isSseHealthy || !current.authenticated || !current.file_transfers.some((file) => ["INIT", "TRANSFERRING"].includes(file.state))) return;
       try { browserStore.replaceSession(await API.getSession()); }
       catch (error) { console.error("Transfer resync failed", error); }
     }, 2000);
     if (stopEvents) {
       stopEvents();
       stopEvents = null;
+      isSseHealthy = false;
     }
     if (session.authenticated) {
       let warned = false;
@@ -63,6 +67,7 @@ async function bootstrap() {
           try { browserStore.replaceSession(await API.getSession()); warned = false; }
           catch (error) { console.error("SSE resync failed", error); }
         },
+        (healthy) => { isSseHealthy = healthy; },
       );
     }
     renderUI(browserStore.snapshot());
